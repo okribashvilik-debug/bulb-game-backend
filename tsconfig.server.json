@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node10",
+    "outDir": "dist-server",
+    "rootDir": ".",
+    "noEmit": false
+  },
+  "include": ["server", "src"],
+  "exclude": ["node_modules", "dist", "dist-server", "examples", "tests", "src/ui", "src/main.tsx"]
+}

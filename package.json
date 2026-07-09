@@ -3,18 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Game logic layer (state machine) for the Bulb Game casino mini-game. No UI.",
-  "main": "src/index.ts",
+  "description": "Bulb Game: server-authoritative backend (server/) + game engine (src/) + React client (src/ui/).",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
     "simulate": "tsx examples/simulate.ts",
     "odds-report": "tsx examples/oddsReport.ts",
     "dev": "vite",
-    "build": "vite build",
+    "build:client": "vite build",
     "preview": "vite preview",
-    "start": "tsx server/index.ts",
-    "server:dev": "tsx watch server/index.ts"
+    "server:dev": "tsx watch server/index.ts",
+    "build": "tsc -p tsconfig.server.json && node server/scripts/writeCjsMarker.mjs",
+    "start": "node server/scripts/ensureBuilt.mjs && node dist-server/server/index.js"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
