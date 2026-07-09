@@ -1,5 +1,5 @@
 import { useGame } from '../GameContext';
-import { bulbNumber, formatCoefficient, formatCurrency } from '../format';
+import { bulbNumber, formatCurrency } from '../format';
 import { getBulbColor } from '../palette';
 
 const QUICK_AMOUNTS = [1, 2, 5, 10] as const;
@@ -78,7 +78,6 @@ export function ControlPanel() {
               style={{ '--bulb-color': color } as React.CSSProperties}
             >
               <span className="bulb-chip__swatch" style={{ backgroundColor: color }} />#{bulbNumber(bulb.id)}
-              <span className="bulb-chip__coeff">{formatCoefficient(snapshot.fixedCoefficients[bulb.id] ?? 0)}</span>
             </button>
           );
         })}
@@ -94,7 +93,10 @@ export function ControlPanel() {
           {humanPlayer.status !== 'active' && ` · ${humanPlayer.status.replace('_', ' ')}`}
         </div>
       )}
-      {!bettingOpen && !alreadyBet && (
+      {snapshot.state === 'calculating' && !alreadyBet && (
+        <div className="control-panel__note">Betting is closed — calculating odds…</div>
+      )}
+      {!bettingOpen && snapshot.state !== 'calculating' && !alreadyBet && (
         <div className="control-panel__note">Betting opens again once this cycle ends.</div>
       )}
     </div>

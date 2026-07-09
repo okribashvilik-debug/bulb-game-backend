@@ -26,7 +26,7 @@ export function BulbTile({ bulb, snapshot, myPlayerId, justPopped, nearMiss }: B
   const isJustPopped = justPopped?.bulbId === bulb.id;
   const isNearMiss = nearMiss?.bulbId === bulb.id;
 
-  const coefficient = isPopped ? undefined : snapshot.liveCoefficients[bulb.id] ?? snapshot.fixedCoefficients[bulb.id];
+  const coefficient = isPopped ? undefined : snapshot.liveCoefficients[bulb.id];
   const bulbColor = getBulbColor(bulb.id);
 
   const classes = [

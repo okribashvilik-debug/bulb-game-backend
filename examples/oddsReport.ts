@@ -1,99 +1,67 @@
 /**
- * Human-readable RTP report for the odds engine. Run with: npm run odds-report
+ * Human-readable report for the pari-mutuel odds engine. Run with:
+ *   npm run odds-report
  *
- * Prints the same simulations the automated test asserts on, but as a
- * table you can eyeball — useful when tuning shape parameters or the odds
- * config. Also explicitly flags any row that drifts from houseRtp beyond
- * a sane tolerance, per the "this is a verification step, not a tuning
- * step" requirement: under the survival-curve model, drift here means a
- * bug in computeSurvivalCurves, not an inherent model limitation.
+ * There is no fixed RTP target here — house take is an emergent property of
+ * how stakes happen to land across bulbs in a given cycle, not a guaranteed
+ * constant (see src/odds/rtpSimulation.ts). This prints the actual house
+ * take across a range of representative player-count / stake-distribution
+ * scenarios, purely for sanity-checking the formula (e.g. "does it ever pay
+ * out more than was staked, net of the house cut?") — variance here is
+ * expected, not a bug to chase.
  */
 import { CHECKPOINTS_BY_BULB_COUNT } from '../src/checkpoints';
 import { DEFAULT_ODDS_CONFIG } from '../src/odds/config';
-import { runFixedOddsRtpSimulation, runMixedStrategyRtpSimulation } from '../src/odds/rtpSimulation';
+import { ALL_SCENARIOS, runPariMutuelSimulation } from '../src/odds/rtpSimulation';
 
 const BULB_COUNTS = [5, 7, 10] as const;
-const SHAPES = ['dominant', 'wide_open', 'duel'] as const;
 const CYCLES = 20_000;
-// Round-by-round cash-out simulation computes the O(n * 2^(n-1)) survival
-// curve per cycle (the hold-to-resolution measurement above never touches
-// it), so it gets its own, smaller cycle budget to keep this report quick.
-const ROUND_BY_ROUND_CYCLES = 5_000;
-const DRIFT_TOLERANCE = 0.03; // 3 percentage points
 
 function pct(n: number): string {
   return `${(n * 100).toFixed(2)}%`;
 }
 
-function flag(rtp: number): string {
-  const drift = Math.abs(rtp - DEFAULT_ODDS_CONFIG.houseRtp);
-  return drift > DRIFT_TOLERANCE ? `  <-- DRIFT DETECTED (${(drift * 100).toFixed(2)}pp), investigate` : '';
-}
-
-console.log(`House RTP target: ${pct(DEFAULT_ODDS_CONFIG.houseRtp)}`);
-console.log(`Coefficient clamp: ${DEFAULT_ODDS_CONFIG.minCoefficient}x - ${DEFAULT_ODDS_CONFIG.maxCoefficient}x`);
-console.log(`Drift tolerance: ${(DRIFT_TOLERANCE * 100).toFixed(1)}pp`);
-console.log(`Cycles per row: ${CYCLES.toLocaleString()}\n`);
-
-console.log('=== Fixed-odds RTP (hold to natural resolution) ===');
+console.log(`House cut rate: ${pct(DEFAULT_ODDS_CONFIG.houseCutRate)} of the losing pool only`);
+console.log(`Cycles per row: ${CYCLES.toLocaleString()}`);
 console.log(
-  ['shape', 'bulbs', 'RTP', 'diff', 'clampHigh', 'clampLow', 'maxCoeff'].map((h) => h.padEnd(10)).join(''),
+  'NOTE: house take below is a MEASUREMENT, not a target — it is expected to vary by scenario and bulb count. ' +
+    'This model has no fixed RTP guarantee; that is the point of pari-mutuel pricing.\n',
 );
-for (const shape of SHAPES) {
+
+console.log('=== House take by scenario (hold to natural resolution) ===');
+console.log(['scenario', 'bulbs', 'wagered', 'paidOut', 'houseTake', 'cancelled'].map((h) => h.padEnd(16)).join(''));
+for (const scenario of ALL_SCENARIOS) {
   for (const bulbCount of BULB_COUNTS) {
-    const r = runFixedOddsRtpSimulation({ bulbCount, cycles: CYCLES, shape });
-    const diff = r.rtp - DEFAULT_ODDS_CONFIG.houseRtp;
+    const r = runPariMutuelSimulation({ bulbCount, cycles: CYCLES, scenario });
     console.log(
       [
-        shape,
+        scenario.name,
         String(bulbCount),
-        pct(r.rtp),
-        `${diff >= 0 ? '+' : ''}${(diff * 100).toFixed(2)}pp`,
-        String(r.clampedHighCount),
-        String(r.clampedLowCount),
-        r.maxCoefficientSeen.toFixed(1) + 'x',
+        r.totalWagered.toFixed(0),
+        r.totalPaidOut.toFixed(0),
+        pct(r.houseTakePct),
+        `${r.uncontestedCycles}/${r.cycles}`,
       ]
-        .map((c) => c.padEnd(10))
-        .join('') + flag(r.rtp),
+        .map((c) => c.padEnd(16))
+        .join(''),
     );
   }
 }
 
-console.log('\n=== Mixed random-shape RTP (shape re-rolled every cycle, like real play) ===');
-const mixed = runFixedOddsRtpSimulation({ bulbCount: 10, cycles: 50_000 });
-console.log(`RTP: ${pct(mixed.rtp)} over ${mixed.cycles.toLocaleString()} cycles${flag(mixed.rtp)}`);
-
-console.log('\n=== Checkpoints (bulbs remaining at each cash-out decision point) ===');
+console.log('\n=== Checkpoints (bulbs remaining at each cash-out decision point — unchanged by this model) ===');
 for (const bulbCount of BULB_COUNTS) {
   console.log(`  ${bulbCount} bulbs: ${CHECKPOINTS_BY_BULB_COUNT[bulbCount].join(', ')}`);
 }
 
-console.log('\n=== Round-by-round cash-out RTP (survival-curve model, checkpoint-gated) ===');
-console.log('Cash-out is only offered at the checkpoints above now — a mathematical guarantee, not an');
-console.log('empirical approximation, so every row should still land near houseRtp.');
-console.log(['shape', 'cashout%', 'RTP', 'diff'].map((h) => h.padEnd(12)).join(''));
-for (const shape of SHAPES) {
-  for (const cashoutProbabilityPerRound of [0.1, 0.3, 0.5, 0.9]) {
-    const r = runMixedStrategyRtpSimulation({
-      bulbCount: 10,
-      cycles: ROUND_BY_ROUND_CYCLES,
-      shape,
-      cashoutProbabilityPerRound,
-    });
-    const diff = r.rtp - DEFAULT_ODDS_CONFIG.houseRtp;
-    console.log(
-      [shape, pct(cashoutProbabilityPerRound), pct(r.rtp), `${diff >= 0 ? '+' : ''}${(diff * 100).toFixed(2)}pp`]
-        .map((c) => c.padEnd(12))
-        .join('') + flag(r.rtp),
-    );
+console.log('\n=== Sanity check: house take should never be negative (never pays out more than staked, net of cut) ===');
+let anyNegative = false;
+for (const scenario of ALL_SCENARIOS) {
+  for (const bulbCount of BULB_COUNTS) {
+    const r = runPariMutuelSimulation({ bulbCount, cycles: CYCLES, scenario });
+    if (r.houseTakePct < -1e-9) {
+      anyNegative = true;
+      console.log(`  <-- NEGATIVE HOUSE TAKE: ${scenario.name} bulbCount=${bulbCount} houseTake=${pct(r.houseTakePct)}`);
+    }
   }
 }
-
-console.log('\n=== Extreme timing strategies (sanity check the guarantee holds at the edges) ===');
-for (const [label, cashoutProbabilityPerRound] of [
-  ['cash out ASAP', 1.0],
-  ['hold as long as possible', 0.02],
-] as const) {
-  const r = runMixedStrategyRtpSimulation({ bulbCount: 10, cycles: ROUND_BY_ROUND_CYCLES, cashoutProbabilityPerRound });
-  console.log(`${label.padEnd(28)} RTP ${pct(r.rtp)}${flag(r.rtp)}`);
-}
+console.log(anyNegative ? 'FAILED — see rows above.' : 'OK — every scenario had a non-negative house take.');

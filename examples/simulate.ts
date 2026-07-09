@@ -27,6 +27,15 @@ engine.on('betPlaced', ({ player }) => {
   console.log(`[bet]   ${player.id} staked ${player.stake} on ${player.bulbId}`);
 });
 
+engine.on('calculatingStarted', () => {
+  console.log('[calc]  betting closed, stakes locked — computing odds…');
+});
+
+engine.on('cycleCancelled', ({ refundedPlayers }) => {
+  const names = refundedPlayers.map((p) => p.id).join(', ') || '(nobody)';
+  console.log(`[cancel] uncontested round — refunded in full: ${names}`);
+});
+
 engine.on('bulbPopped', ({ bulb, round, affectedPlayers }) => {
   const names = affectedPlayers.map((p) => p.id).join(', ') || '(no players on it)';
   console.log(`[pop]   round ${round}: ${bulb.id} popped — affected: ${names}`);

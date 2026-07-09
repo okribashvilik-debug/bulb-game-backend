@@ -16,17 +16,23 @@
 import type { WebSocket } from 'ws';
 import { BulbGameEngine, type BulbCount, type BulbGameEvents, type CycleSnapshot } from '../../src/index';
 import { placeBet as placeBetRpc, resolveBet, voidBet, InsufficientBalanceError } from '../db/betsRepo';
-import { markBettingClosed, markCycleComplete, insertCycle } from '../db/cyclesRepo';
+import { markBettingClosed, markCycleCancelled, markCycleComplete, insertCycle } from '../db/cyclesRepo';
 import { insertLiveBetEvent } from '../db/liveBetsRepo';
 import { getPlayerBalance } from '../db/playersRepo';
 
 const AUTO_RESTART_DELAY_MS = 4_500;
+/** An uncontested/cancelled cycle has nothing to linger on (no winner to
+ *  show) — "immediately open a new betting window" gets a much shorter
+ *  pause than a normal cycle_complete, just enough for refunds to land. */
+const CANCELLED_RESTART_DELAY_MS = 500;
 
 /** Events broadcast verbatim to clients as `{type:'event', event, payload}`.
  *  'stateChange' is handled separately, as a dedicated `snapshot` message —
  *  see broadcastSnapshot. */
 const BROADCAST_EVENT_NAMES = [
   'betPlaced',
+  'calculatingStarted',
+  'cycleCancelled',
   'roundStarted',
   'bulbPopped',
   'decisionWindowStarted',
@@ -66,9 +72,13 @@ export class GameSession {
       this.engine.on(eventName, (payload) => this.broadcastEvent(eventName, payload));
     }
 
-    this.engine.on('roundStarted', ({ round }) => {
-      if (round === 1) void this.handleBettingClosed();
-    });
+    // 'calculatingStarted' fires exactly once, the instant betting closes —
+    // stakes are locked from this point, so this is the moment to persist
+    // that the window is shut (replaces the old round===1 inference, which
+    // no longer holds now that 'calculating' sits between betting and the
+    // first round).
+    this.engine.on('calculatingStarted', () => void this.handleBettingClosed());
+    this.engine.on('cycleCancelled', (payload) => void this.handleCycleCancelled(payload));
     this.engine.on('bulbPopped', (payload) => void this.handleBulbPopped(payload));
     this.engine.on('playerCashedOut', (payload) => void this.handlePlayerCashedOut(payload));
     this.engine.on('cycleComplete', (payload) => void this.handleCycleComplete(payload));
@@ -249,6 +259,42 @@ export class GameSession {
     }
   }
 
+  /** Uncontested round (fewer than 2 bulbs staked) — refund everyone in
+   *  full, mark the cycle row cancelled, and start a fresh cycle almost
+   *  immediately (see CANCELLED_RESTART_DELAY_MS). */
+  private async handleCycleCancelled({ refundedPlayers }: BulbGameEvents['cycleCancelled']): Promise<void> {
+    const cycleDbId = this.currentCycleDbId;
+    const contestedBulbCount = this.engine.getAuditRecord()?.cancelled?.contestedBulbCount ?? 0;
+
+    for (const player of refundedPlayers) {
+      const betId = this.betDbIdByPlayerId.get(player.id);
+      if (betId) {
+        await voidBet(betId).catch((err) => this.logError('voidBet(cancelled)', err));
+      }
+      insertLiveBetEvent({
+        cycleId: cycleDbId,
+        mode: this.mode,
+        playerId: player.id,
+        displayName: this.displayNameByPlayerId.get(player.id) ?? player.id,
+        bulbId: player.bulbId,
+        stake: player.stake,
+        payout: player.stake, // full refund — shown the same as a payout in the feed
+        eventType: 'cashed_out',
+      }).catch((err) => this.logError('insertLiveBetEvent(cancelled)', err));
+
+      await this.sendBalanceUpdate(player.id);
+    }
+
+    if (cycleDbId) {
+      markCycleCancelled(cycleDbId, contestedBulbCount).catch((err) => this.logError('markCycleCancelled', err));
+    }
+
+    this.restartTimer = setTimeout(() => {
+      if (this.stopped) return;
+      if (this.engine.getState() === 'cycle_cancelled') void this.startNewCycle();
+    }, CANCELLED_RESTART_DELAY_MS);
+  }
+
   private async handleBulbPopped({ round, affectedPlayers }: BulbGameEvents['bulbPopped']): Promise<void> {
     for (const player of affectedPlayers) {
       const betId = this.betDbIdByPlayerId.get(player.id);
@@ -305,8 +351,9 @@ export class GameSession {
 
   private async handleCycleComplete({ winners }: BulbGameEvents['cycleComplete']): Promise<void> {
     const cycleDbId = this.currentCycleDbId;
-    if (cycleDbId) {
-      markCycleComplete(cycleDbId).catch((err) => this.logError('markCycleComplete', err));
+    const audit = this.engine.getAuditRecord();
+    if (cycleDbId && audit) {
+      markCycleComplete(cycleDbId, audit).catch((err) => this.logError('markCycleComplete', err));
     }
 
     const snapshot = this.engine.getSnapshot();
@@ -314,7 +361,9 @@ export class GameSession {
       const betId = this.betDbIdByPlayerId.get(winner.id);
       const value = winner.result?.value ?? 0;
       const round = winner.result?.round ?? 0;
-      const coefficient = snapshot.fixedCoefficients[winner.bulbId] ?? null;
+      // Same live pari-mutuel coefficient the engine just paid the winner
+      // with (see BulbGameEngine.endCycle) — no separate "fixed" formula.
+      const coefficient = snapshot.liveCoefficients[winner.bulbId] ?? null;
 
       // Awaited, same reasoning as handlePlayerCashedOut: sendBalanceUpdate
       // must not run until the credit inside resolveBet has landed.

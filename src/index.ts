@@ -13,6 +13,7 @@ export type {
   Player,
   PlayerResult,
   PlayerStatus,
+  RoundPoolRecord,
 } from './types';
 export { CHECKPOINTS_BY_BULB_COUNT, isCashOutCheckpoint } from './checkpoints';
 

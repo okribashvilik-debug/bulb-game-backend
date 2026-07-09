@@ -1,24 +1,20 @@
 export { DEFAULT_ODDS_CONFIG, type OddsConfig } from './config';
-export { probabilityToCoefficient } from './coefficients';
 export {
-  generateDominantShape,
-  generateDuelShape,
-  generateWideOpenShape,
-  generateShapeProbabilities,
-  pickRandomShape,
-  type ProbabilityShape,
-} from './shapes';
+  computeCoefficient,
+  computeCoefficients,
+  computeEliminatedPool,
+  totalStakeByBulbId,
+} from './parimutuel';
+export { planCycleOutcome, type CycleOutcomePlan } from './outcomePlan';
+export { PariMutuelEngine, type OddsProvider } from './PariMutuelEngine';
 export {
-  decideWinningBulb,
-  generateEliminationOrder,
-  planCycleOutcome,
-  type CycleOutcomePlan,
-} from './outcomePlan';
-export { computeSurvivalCurves } from './survivalCurves';
-export { FixedOddsEngine, type OddsProvider } from './FixedOddsEngine';
-export {
-  runFixedOddsRtpSimulation,
-  runMixedStrategyRtpSimulation,
-  runRtpSimulation,
-  type RtpSimulationResult,
+  runPariMutuelSimulation,
+  ALL_SCENARIOS,
+  concentratedScenario,
+  evenSpreadScenario,
+  tenPlayersScenario,
+  twoPlayersScenario,
+  uncontestedScenario,
+  type PariMutuelSimulationResult,
+  type StakeScenario,
 } from './rtpSimulation';

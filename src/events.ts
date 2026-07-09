@@ -4,6 +4,12 @@ import type { Bulb, CycleSnapshot, Player } from './types';
 export type BulbGameEvents = {
   stateChange: { snapshot: CycleSnapshot };
   betPlaced: { player: Player };
+  /** Betting just closed; stakes are locked and odds are being computed —
+   *  fires once, at the start of the fixed 3s 'calculating' phase. */
+  calculatingStarted: { durationMs: number };
+  /** Fewer than 2 bulbs received any stake at all — nothing to price, so
+   *  the round never plays. Every listed player is refunded in full. */
+  cycleCancelled: { reason: 'uncontested'; refundedPlayers: Player[] };
   roundStarted: { round: number; totalRounds: number; durationMs: number };
   bulbPopped: { bulb: Bulb; round: number; affectedPlayers: Player[] };
   decisionWindowStarted: {

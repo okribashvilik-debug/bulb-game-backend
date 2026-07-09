@@ -1,205 +1,184 @@
 /**
- * Simulation harness for the odds engine, kept inside the module itself so
- * it can be reused by both the automated RTP test and any future
- * human-readable balancing report — this is a property of the odds math,
- * independent of the state machine's timers, so it's tested in isolation
- * rather than by driving BulbGameEngine through thousands of real cycles.
+ * Simulation harness for the pari-mutuel odds engine.
+ *
+ * There is no fixed RTP target to converge to anymore — house take is now
+ * an emergent consequence of how stakes happen to be distributed across
+ * bulbs in a given cycle, not a guaranteed constant. This harness instead
+ * runs a range of realistic player-count / stake-distribution scenarios and
+ * reports the ACTUAL house take as a percentage of total volume wagered,
+ * so it can be eyeballed for sanity (e.g. "does it ever pay out more than
+ * was staked?") rather than asserted against a target percentage.
+ *
+ * Every simulated player holds to natural resolution (never cashes out
+ * early) — cash-out pricing uses the exact same formula as the final win
+ * payout (see parimutuel.ts), so simulating hold-to-resolution already
+ * exercises the whole pricing model; timing strategy doesn't change the
+ * house's total take, only which round an individual player is paid at.
  */
-import { isCashOutCheckpoint } from '../checkpoints';
-import { DEFAULT_ODDS_CONFIG, type OddsConfig } from './config';
-import { probabilityToCoefficient } from './coefficients';
+import { computeCoefficients } from './parimutuel';
 import { planCycleOutcome } from './outcomePlan';
-import type { ProbabilityShape } from './shapes';
+import { DEFAULT_ODDS_CONFIG, type OddsConfig } from './config';
 import { DefaultRandomSource, type RandomSource } from '../rng';
-import type { BulbCount } from '../types';
+import type { Bulb, BulbCount, Player } from '../types';
 
-export interface RtpSimulationResult {
-  shape: ProbabilityShape | 'mixed';
+export interface StakeScenario {
+  name: string;
+  /** Generates one cycle's bettors: which bulb (1-based index into
+   *  bulbIds) each stakes on, and how much. */
+  generateStakes(bulbCount: number, rng: RandomSource): Array<{ bulbIndex: number; stake: number }>;
+}
+
+export interface PariMutuelSimulationResult {
+  scenario: string;
   bulbCount: BulbCount;
   cycles: number;
-  totalStake: number;
-  totalPayout: number;
-  /** totalPayout / totalStake — should converge to config.houseRtp. */
-  rtp: number;
-  minCoefficientSeen: number;
-  maxCoefficientSeen: number;
-  clampedLowCount: number;
-  clampedHighCount: number;
+  totalWagered: number;
+  totalPaidOut: number;
+  /** 1 - totalPaidOut/totalWagered. Variable by design — not a target. */
+  houseTakePct: number;
+  /** Cycles where fewer than 2 bulbs received any stake at all, and so were
+   *  auto-cancelled/refunded rather than played (excluded from the wagered/
+   *  paid-out totals above, since a refunded cycle has no house take). */
+  uncontestedCycles: number;
 }
 
 function makeBulbIds(count: number): string[] {
   return Array.from({ length: count }, (_, i) => `bulb_${i + 1}`);
 }
 
-/**
- * Primary RTP measurement: the "fixed-odds" definition of the model.
- * Simulates one 1-unit bettor per bulb per cycle who holds to natural
- * resolution (never cashes out early). Payout is the bulb's fixed
- * coefficient — locked at cycle start from its original probability — if
- * and only if that bulb turns out to be the predetermined winner.
- *
- * This has a clean theoretical target: E[payout] = sum_i p_i * (RTP/p_i)
- * = RTP, exactly, whenever the clamp doesn't bind. Long-run convergence to
- * ~houseRtp here is the direct test of "coefficient = HOUSE_RTP/probability"
- * being wired correctly.
- */
-export function runFixedOddsRtpSimulation(options: {
+/** Runs one scenario across `cycles` simulated cycles, playing every bet to
+ *  natural resolution, and reports the resulting house take. */
+export function runPariMutuelSimulation(options: {
   bulbCount: BulbCount;
   cycles: number;
-  shape?: ProbabilityShape;
+  scenario: StakeScenario;
   config?: OddsConfig;
   rng?: RandomSource;
-}): RtpSimulationResult {
-  const { bulbCount, cycles, shape, config = DEFAULT_ODDS_CONFIG, rng = new DefaultRandomSource() } = options;
+}): PariMutuelSimulationResult {
+  const { bulbCount, cycles, scenario, config = DEFAULT_ODDS_CONFIG, rng = new DefaultRandomSource() } = options;
   const bulbIds = makeBulbIds(bulbCount);
 
-  let totalStake = 0;
-  let totalPayout = 0;
-  let minCoefficientSeen = Infinity;
-  let maxCoefficientSeen = -Infinity;
-  let clampedLowCount = 0;
-  let clampedHighCount = 0;
+  let totalWagered = 0;
+  let totalPaidOut = 0;
+  let uncontestedCycles = 0;
 
   for (let cycle = 0; cycle < cycles; cycle++) {
-    const plan = planCycleOutcome(bulbIds, config, rng, { forcedShape: shape });
+    const stakes = scenario.generateStakes(bulbCount, rng);
+    const players: Player[] = stakes.map((s, i) => ({
+      id: `p${i}`,
+      bulbId: bulbIds[s.bulbIndex],
+      stake: s.stake,
+      status: 'active' as const,
+    }));
 
-    for (const bulbId of bulbIds) {
-      const coefficient = plan.fixedCoefficientByBulbId.get(bulbId)!;
-      totalStake += 1;
-      totalPayout += bulbId === plan.winningBulbId ? coefficient : 0;
+    const contestedBulbCount = new Set(players.map((p) => p.bulbId)).size;
+    if (contestedBulbCount < 2) {
+      uncontestedCycles += 1;
+      continue; // refunded — no wager stands, no house take
+    }
 
-      minCoefficientSeen = Math.min(minCoefficientSeen, coefficient);
-      maxCoefficientSeen = Math.max(maxCoefficientSeen, coefficient);
-      if (coefficient <= config.minCoefficient) clampedLowCount += 1;
-      if (coefficient >= config.maxCoefficient) clampedHighCount += 1;
+    const { winningBulbId, eliminationOrder } = planCycleOutcome(bulbIds, rng);
+    const bulbs: Bulb[] = bulbIds.map((id) => ({ id, status: 'alive' as const }));
+
+    // Reveal pops one at a time, exactly as the real engine does, pricing
+    // every remaining bulb after each pop — the winner is only priced once
+    // every other bulb has already popped, which is what makes the win
+    // payout fall out of the same formula as a mid-round cash-out.
+    for (const poppedId of eliminationOrder) {
+      const popped = bulbs.find((b) => b.id === poppedId)!;
+      popped.status = 'popped';
+    }
+
+    const coefficients = computeCoefficients(bulbs, players, config.houseCutRate);
+    for (const player of players) {
+      totalWagered += player.stake;
+      if (player.bulbId === winningBulbId) {
+        const coefficient = coefficients.get(player.bulbId);
+        if (coefficient !== undefined) {
+          totalPaidOut += player.stake * coefficient;
+        }
+      }
     }
   }
 
   return {
-    shape: shape ?? 'mixed',
+    scenario: scenario.name,
     bulbCount,
     cycles,
-    totalStake,
-    totalPayout,
-    rtp: totalPayout / totalStake,
-    minCoefficientSeen,
-    maxCoefficientSeen,
-    clampedLowCount,
-    clampedHighCount,
+    totalWagered,
+    totalPaidOut,
+    houseTakePct: totalWagered > 0 ? 1 - totalPaidOut / totalWagered : 0,
+    uncontestedCycles,
   };
 }
 
-/**
- * Secondary measurement: simulates bettors who cash out early using the
- * round-by-round, survival-curve-derived cash-out coefficient — exercising
- * the exact same lookup BulbGameEngine.cashOut() uses, restricted to the
- * exact same checkpoint rounds real players are actually offered a
- * decision at (see checkpoints.ts). Every surviving bettor still alive at
- * a checkpoint cashes out with probability `cashoutProbabilityPerRound`;
- * at non-checkpoint rounds nobody is offered anything (implicit
- * "continue"); if a bettor never cashes out, they're paid the fixed
- * coefficient on natural resolution, exactly like the real engine.
- *
- * Unlike the OLD renormalization-based live coefficient (which this
- * replaces), this now has the SAME clean theoretical target as the
- * fixed-odds measurement above: cash_out_i(r) = HOUSE_RTP / survival_i(r)
- * is constructed so that P(reach r) * cash_out_i(r) = HOUSE_RTP for every
- * bulb and every r, by definition of survival_i(r) itself. Restricting
- * WHICH rounds actually offer that opportunity doesn't touch the formula
- * at all — it's still exactly as fair at every checkpoint it fires on, so
- * long-run RTP should converge to houseRtp just as tightly as before the
- * checkpoint restructure. See survivalCurves.ts for the derivation.
- */
-export function runMixedStrategyRtpSimulation(options: {
-  bulbCount: BulbCount;
-  cycles: number;
-  shape?: ProbabilityShape;
-  cashoutProbabilityPerRound?: number;
-  config?: OddsConfig;
-  rng?: RandomSource;
-}): RtpSimulationResult {
-  const {
-    bulbCount,
-    cycles,
-    shape,
-    cashoutProbabilityPerRound = 0.3,
-    config = DEFAULT_ODDS_CONFIG,
-    rng = new DefaultRandomSource(),
-  } = options;
-  const bulbIds = makeBulbIds(bulbCount);
+// -------------------------------------------------------------------------
+// Representative scenarios
+// -------------------------------------------------------------------------
 
-  let totalStake = 0;
-  let totalPayout = 0;
-  let minCoefficientSeen = Infinity;
-  let maxCoefficientSeen = -Infinity;
-  let clampedLowCount = 0;
-  let clampedHighCount = 0;
+function randomStake(rng: RandomSource): number {
+  const pool = [1, 2, 5, 10, 20, 25, 50, 100];
+  return pool[Math.floor(rng.next() * pool.length)];
+}
 
-  for (let cycle = 0; cycle < cycles; cycle++) {
-    const plan = planCycleOutcome(bulbIds, config, rng, { forcedShape: shape });
-    const resolved = new Set<string>();
-    const payoutByBulbId = new Map<string, number>(bulbIds.map((id) => [id, 0]));
+/** Every bulb gets exactly one bettor, evenly spread, stakes randomized. */
+export const evenSpreadScenario: StakeScenario = {
+  name: 'even spread (1 bettor per bulb)',
+  generateStakes: (bulbCount, rng) =>
+    Array.from({ length: bulbCount }, (_, i) => ({ bulbIndex: i, stake: randomStake(rng) })),
+};
 
-    // Walk the sealed elimination order round by round, exactly as the
-    // real engine reveals it. After the pop at index `idx` (round idx+1
-    // resolved), survivors are offered the round (idx+2) cash-out value.
-    plan.eliminationOrder.forEach((poppedId, idx) => {
-      resolved.add(poppedId); // popped bettors are resolved at 0, stake lost
+/** Just two players, one bulb each — the minimum contested cycle. */
+export const twoPlayersScenario: StakeScenario = {
+  name: '2 players, 1 bulb each',
+  generateStakes: (bulbCount, rng) => {
+    const a = Math.floor(rng.next() * bulbCount);
+    let b = Math.floor(rng.next() * bulbCount);
+    while (b === a) b = Math.floor(rng.next() * bulbCount);
+    return [
+      { bulbIndex: a, stake: randomStake(rng) },
+      { bulbIndex: b, stake: randomStake(rng) },
+    ];
+  },
+};
 
-      const round = idx + 1;
-      const isFinalRound = round === plan.eliminationOrder.length; // only the winner remains after this
-      if (isFinalRound) {
-        if (!resolved.has(plan.winningBulbId)) {
-          payoutByBulbId.set(plan.winningBulbId, plan.fixedCoefficientByBulbId.get(plan.winningBulbId)!);
-          resolved.add(plan.winningBulbId);
-        }
-        return;
-      }
+/** Ten players scattered across bulbs at random (some bulbs may get several,
+ *  some may get none). */
+export const tenPlayersScenario: StakeScenario = {
+  name: '10 players, scattered',
+  generateStakes: (bulbCount, rng) =>
+    Array.from({ length: 10 }, () => ({
+      bulbIndex: Math.floor(rng.next() * bulbCount),
+      stake: randomStake(rng),
+    })),
+};
 
-      const aliveCountAfterThisPop = bulbIds.length - round;
-      if (!isCashOutCheckpoint(bulbCount, aliveCountAfterThisPop)) {
-        return; // not a checkpoint round — nobody is offered a decision, implicit "continue"
-      }
-
-      const lookupRound = round + 1;
-      for (const bulbId of bulbIds) {
-        if (resolved.has(bulbId)) continue; // already popped or already cashed out
-
-        // The eventual winner is offered a cash-out here too, using its own
-        // survival curve, exactly like everyone else — it doesn't "know"
-        // yet that it will win. That's the point of this model.
-        const survivalProbability = plan.survivalCurveByBulbId.get(bulbId)![lookupRound - 1];
-        const coefficient = probabilityToCoefficient(survivalProbability, config);
-        minCoefficientSeen = Math.min(minCoefficientSeen, coefficient);
-        maxCoefficientSeen = Math.max(maxCoefficientSeen, coefficient);
-        if (coefficient <= config.minCoefficient) clampedLowCount += 1;
-        if (coefficient >= config.maxCoefficient) clampedHighCount += 1;
-
-        if (rng.next() < cashoutProbabilityPerRound) {
-          payoutByBulbId.set(bulbId, coefficient);
-          resolved.add(bulbId);
-        }
-      }
-    });
-
-    for (const bulbId of bulbIds) {
-      totalStake += 1;
-      totalPayout += payoutByBulbId.get(bulbId)!;
+/** Heavy stake concentration: most players pile onto one favorite bulb,
+ *  with a handful of longshot bettors scattered on the rest. */
+export const concentratedScenario: StakeScenario = {
+  name: 'concentrated (most stake on one bulb)',
+  generateStakes: (bulbCount, rng) => {
+    const favorite = Math.floor(rng.next() * bulbCount);
+    const bets = Array.from({ length: 8 }, () => ({ bulbIndex: favorite, stake: randomStake(rng) }));
+    for (let i = 0; i < bulbCount; i++) {
+      if (i === favorite) continue;
+      if (rng.next() < 0.5) bets.push({ bulbIndex: i, stake: randomStake(rng) });
     }
-  }
+    return bets;
+  },
+};
 
-  return {
-    shape: shape ?? 'mixed',
-    bulbCount,
-    cycles,
-    totalStake,
-    totalPayout,
-    rtp: totalPayout / totalStake,
-    minCoefficientSeen,
-    maxCoefficientSeen,
-    clampedLowCount,
-    clampedHighCount,
-  };
-}
+/** Only one bulb ever receives a stake — the uncontested/cancelled case. */
+export const uncontestedScenario: StakeScenario = {
+  name: 'uncontested (all stake on 1 bulb)',
+  generateStakes: (bulbCount, rng) =>
+    Array.from({ length: 5 }, () => ({ bulbIndex: 0, stake: randomStake(rng) })),
+};
 
-export const runRtpSimulation = runFixedOddsRtpSimulation;
+export const ALL_SCENARIOS: StakeScenario[] = [
+  twoPlayersScenario,
+  evenSpreadScenario,
+  tenPlayersScenario,
+  concentratedScenario,
+  uncontestedScenario,
+];

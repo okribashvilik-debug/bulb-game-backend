@@ -286,6 +286,16 @@ button:disabled {
   transition: width 0.1s linear;
 }
 
+.main-event__cancelled-notice {
+  font-size: 12.5px;
+  color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--gold) 35%, transparent);
+  border-radius: 8px;
+  padding: 8px 12px;
+  text-align: center;
+}
+
 .bulb-grid {
   display: flex;
   flex-wrap: wrap;

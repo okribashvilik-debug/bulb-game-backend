@@ -206,13 +206,16 @@ leak every future pop in the cycle in advance.
   `GameSession.placeBet`), the server calls `void_bet()` to refund and
   delete it, keeping balance and bet history consistent with the actual
   game state.
-- **Audit trail**: every cycle's shape, per-bulb probabilities, fixed
-  coefficients, winning bulb, and full elimination order are written to
-  `cycles` the moment the cycle starts (all of it is already sealed by
-  then — see `BulbGameEngine`'s integrity ordering). Every bet's full
+- **Audit trail**: every cycle's winning bulb and full elimination order
+  (decided by a fair uniform shuffle — see `src/odds/outcomePlan.ts`) are
+  written to `cycles` the moment the cycle starts. The pari-mutuel pool math
+  — final stake per bulb, the house cut rate used, and the round-by-round
+  eliminated/distributable pool history — is written once more when the
+  cycle finishes (or marked `cancelled` with a reason, for an uncontested
+  round that got refunded — see `src/odds/parimutuel.ts`). Every bet's full
   lifecycle (placed, resolved outcome, coefficient used, payout) is in
-  `bets`. That's enough to independently re-run the RTP simulation harness
-  (`npm run odds-report`) against real production data later.
+  `bets`. That's enough to independently re-derive any payout later, or run
+  the scenario report (`npm run odds-report`) against real production data.
 
 ## What this task did *not* include
 

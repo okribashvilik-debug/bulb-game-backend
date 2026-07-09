@@ -10,19 +10,31 @@ export interface PlayerRow {
   updated_at: string;
 }
 
-export type CycleStatus = 'betting' | 'active' | 'complete';
+export type CycleStatus = 'betting' | 'active' | 'complete' | 'cancelled';
+
+export interface RoundPoolRow {
+  round: number;
+  eliminatedPool: number;
+  distributablePool: number;
+}
 
 export interface CycleRow {
   id: string;
   engine_cycle_id: string | null;
   mode: 5 | 7 | 10;
-  shape: 'dominant' | 'wide_open' | 'duel';
-  probabilities: Record<string, number>;
-  fixed_coefficients: Record<string, number>;
   winning_bulb_id: string | null;
   elimination_order: string[] | null;
   total_rounds: number;
   status: CycleStatus;
+  /** Total stake per bulb, locked once betting closed. Null until the cycle
+   *  finishes (see markCycleComplete). Bulb id -> stake. */
+  final_stake_by_bulb: Record<string, number> | null;
+  /** The house-cut fraction actually used for this cycle's pricing. */
+  house_cut_rate: number | null;
+  /** One entry per round resolved, in order. Null until the cycle finishes. */
+  round_pool_history: RoundPoolRow[] | null;
+  /** Populated only for status='cancelled' (uncontested round, refunded). */
+  cancel_reason: string | null;
   started_at: string;
   betting_closed_at: string | null;
   ended_at: string | null;

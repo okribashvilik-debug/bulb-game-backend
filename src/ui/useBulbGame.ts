@@ -9,7 +9,6 @@
  * standalone demo built before this backend existed.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { detectNearMissBulbId } from './nearMiss';
 import { soundManager } from './sound';
 import type { Bulb, BulbCount, CycleSnapshot, Player } from '../types';
 
@@ -19,8 +18,8 @@ const OUTCOME_HISTORY_LIMIT = 30;
 const BETS_FEED_LIMIT = 60;
 const RESOLVED_BETS_LIMIT = 500;
 const JUST_POPPED_DURATION_MS = 750;
-const NEAR_MISS_DURATION_MS = 2200;
 const WIN_PULSE_DURATION_MS = 2600;
+const CANCELLED_NOTICE_DURATION_MS = 2500;
 const WIN_SOUND_DELAY_MS = 150; // let the final round's pop sound resolve first
 const RECONNECT_DELAY_MS = 2000;
 
@@ -85,6 +84,13 @@ export interface WinPulse {
   token: number;
 }
 
+/** Brief banner shown when a round is auto-cancelled as uncontested (fewer
+ *  than 2 bulbs staked) and every stake is refunded in full. */
+export interface CancelledNotice {
+  token: number;
+  refundedCount: number;
+}
+
 export type ConnectionStatus = 'connecting' | 'open' | 'closed';
 
 export interface UseBulbGameResult {
@@ -108,6 +114,7 @@ export interface UseBulbGameResult {
   justPopped: JustPopped | null;
   nearMiss: NearMiss | null;
   winPulse: WinPulse | null;
+  cancelledNotice: CancelledNotice | null;
   muted: boolean;
   setMuted: (muted: boolean) => void;
 }
@@ -170,7 +177,6 @@ const EMPTY_SNAPSHOT: CycleSnapshot = {
   players: [],
   currentRound: 0,
   totalRounds: 0,
-  fixedCoefficients: {},
   liveCoefficients: {},
 };
 
@@ -195,13 +201,13 @@ export function useBulbGame(): UseBulbGameResult {
   const [resolvedBets, setResolvedBets] = useState<ResolvedBet[]>([]);
 
   const [justPopped, setJustPopped] = useState<JustPopped | null>(null);
-  const [nearMiss, setNearMiss] = useState<NearMiss | null>(null);
+  const [nearMiss] = useState<NearMiss | null>(null);
   const [winPulse, setWinPulse] = useState<WinPulse | null>(null);
+  const [cancelledNotice, setCancelledNotice] = useState<CancelledNotice | null>(null);
   const [muted, setMutedState] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const seededLiveBetsRef = useRef(false);
-  const aliveBulbIdsRef = useRef<string[]>([]);
 
   const setMuted = useCallback((value: boolean) => {
     soundManager.setMuted(value);
@@ -230,9 +236,9 @@ export function useBulbGame(): UseBulbGameResult {
     let cancelled = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let justPoppedTimer: ReturnType<typeof setTimeout> | undefined;
-    let nearMissTimer: ReturnType<typeof setTimeout> | undefined;
     let winPulseTimer: ReturnType<typeof setTimeout> | undefined;
     let winSoundTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancelledNoticeTimer: ReturnType<typeof setTimeout> | undefined;
 
     function handleGameEvent(event: string, payload: unknown): void {
       const cycleId = snapshotRef.current.cycleId;
@@ -302,20 +308,11 @@ export function useBulbGame(): UseBulbGameResult {
           } else {
             soundManager.playPopNeutral();
           }
-
-          // The 'snapshot' broadcast for this pop hasn't arrived yet (the
-          // engine emits 'bulbPopped' before its next stateChange) — derive
-          // the post-pop survivor list from the last known alive set instead
-          // of waiting for it.
-          const survivorIds = aliveBulbIdsRef.current.filter((id) => id !== bulb.id);
-          aliveBulbIdsRef.current = survivorIds;
-          const nearMissId = detectNearMissBulbId(bulb.id, survivorIds, snapshotRef.current.fixedCoefficients);
-          if (nearMissId) {
-            clearTimeout(nearMissTimer);
-            setNearMiss({ token: nextTransientToken(), bulbId: nearMissId });
-            nearMissTimer = setTimeout(() => setNearMiss(null), NEAR_MISS_DURATION_MS);
-            soundManager.playNearMiss();
-          }
+          // Note: there's no "near miss" cue anymore — elimination order is
+          // uniform random under the pari-mutuel model (see
+          // odds/outcomePlan.ts), so a coefficient no longer correlates with
+          // how close a bulb was to popping. The old cue was built entirely
+          // on that correlation and would now be actively misleading.
           break;
         }
 
@@ -357,7 +354,7 @@ export function useBulbGame(): UseBulbGameResult {
           const finalSnapshot = snapshotRef.current;
 
           if (winningBulbId) {
-            const coefficient = finalSnapshot.fixedCoefficients[winningBulbId];
+            const coefficient = finalSnapshot.liveCoefficients[winningBulbId];
             setOutcomeHistory((history) =>
               capPrepend(
                 history,
@@ -414,6 +411,14 @@ export function useBulbGame(): UseBulbGameResult {
           }
           break;
         }
+
+        case 'cycleCancelled': {
+          const { refundedPlayers } = payload as { refundedPlayers: Player[] };
+          clearTimeout(cancelledNoticeTimer);
+          setCancelledNotice({ token: nextTransientToken(), refundedCount: refundedPlayers.length });
+          cancelledNoticeTimer = setTimeout(() => setCancelledNotice(null), CANCELLED_NOTICE_DURATION_MS);
+          break;
+        }
       }
     }
 
@@ -429,7 +434,6 @@ export function useBulbGame(): UseBulbGameResult {
 
         case 'snapshot': {
           snapshotRef.current = message.snapshot;
-          aliveBulbIdsRef.current = message.snapshot.bulbs.filter((b) => b.status === 'alive').map((b) => b.id);
           setSnapshot(message.snapshot);
           if (message.snapshot.bulbCount !== bulbCountRef.current) {
             bulbCountRef.current = message.snapshot.bulbCount;
@@ -539,9 +543,9 @@ export function useBulbGame(): UseBulbGameResult {
       cancelled = true;
       clearTimeout(reconnectTimer);
       clearTimeout(justPoppedTimer);
-      clearTimeout(nearMissTimer);
       clearTimeout(winPulseTimer);
       clearTimeout(winSoundTimer);
+      clearTimeout(cancelledNoticeTimer);
       wsRef.current?.close();
       wsRef.current = null;
     };
@@ -596,6 +600,7 @@ export function useBulbGame(): UseBulbGameResult {
     justPopped,
     nearMiss,
     winPulse,
+    cancelledNotice,
     muted,
     setMuted,
   };

@@ -2,11 +2,8 @@
  * Core type definitions for the Bulb Game engine.
  *
  * No UI/rendering concerns — it only describes the shapes of data the
- * state machine reads and produces. The only cross-module reference is the
- * `ProbabilityShape` type-only import below (zero runtime coupling), kept
- * here so CycleSnapshot can report which shape a cycle rolled.
+ * state machine reads and produces.
  */
-import type { ProbabilityShape } from './odds/shapes';
 
 /** Bulb counts the game currently supports. */
 export type BulbCount = 5 | 7 | 10;
@@ -51,9 +48,11 @@ export interface Player {
 export type GameState =
   | 'idle'             // no cycle has been started yet
   | 'betting'          // betting window open, players may join
+  | 'calculating'      // betting just closed; stakes are final, odds are being computed
   | 'round_active'     // a round's countdown is running toward a pop
   | 'decision_window'  // survivors may cash out or continue
-  | 'cycle_complete';  // exactly one bulb remains; cycle over, awaiting reset
+  | 'cycle_complete'   // exactly one bulb remains; cycle over, awaiting reset
+  | 'cycle_cancelled'; // uncontested (<2 bulbs staked) — refunded, no round played
 
 export interface CycleTimings {
   /** Fixed durations (ms) — not randomized ranges. Pacing is retuned by
@@ -78,16 +77,13 @@ export interface CycleSnapshot {
   /** Always bulbCount - 1. */
   totalRounds: number;
   winningBulbId?: string;
-  /** Which probability shape this cycle rolled. Safe to reveal any time —
-   *  it says nothing about which bulb is which. Undefined only in 'idle'. */
-  shape?: ProbabilityShape;
-  /** coefficient = HOUSE_RTP / original probability, clamped. Locked for
-   *  the whole cycle at cycle start — the fixed-odds board a UI would show
-   *  during betting. Keyed by bulb id. */
-  fixedCoefficients: Record<string, number>;
-  /** Round-by-round cash-out coefficient for currently-alive bulbs only,
-   *  looked up from each bulb's own precomputed survival curve — what a
-   *  cash-out is actually worth right now. Keyed by bulb id. */
+  /** Live pari-mutuel coefficient for currently-alive, currently-staked
+   *  bulbs only — computed fresh from real stake totals (see
+   *  odds/parimutuel.ts). Empty during 'idle' / 'betting' / 'calculating'
+   *  (nothing can be priced until stakes are final), and a bulb with zero
+   *  stake never appears as a key even once pricing starts — the UI must
+   *  render a missing key as blank, never as 0 or any other fallback. Keyed
+   *  by bulb id. */
   liveCoefficients: Record<string, number>;
   /** Wall-clock deadline (ms, comparable to Date.now()) for the current
    *  timed phase (betting / round_active / decision_window), or undefined
@@ -100,13 +96,23 @@ export interface CycleSnapshot {
   phaseDurationMs?: number;
 }
 
+/** One round's snapshot of the pari-mutuel pool math, recorded as it
+ *  happens — part of CycleAuditRecord so a cycle's entire payout history
+ *  can be independently re-derived later. */
+export interface RoundPoolRecord {
+  round: number;
+  eliminatedPool: number;
+  distributablePool: number;
+}
+
 /**
- * Full audit record for a cycle's sealed outcome plan — everything needed
- * to independently re-validate RTP later, including `eliminationOrder`.
+ * Full audit record for a cycle — everything needed to independently
+ * re-validate every payout later, including `eliminationOrder` and the
+ * round-by-round pool math.
  *
  * Deliberately NOT part of CycleSnapshot / getSnapshot(): eliminationOrder
  * reveals every future pop in advance, so broadcasting it to clients would
- * break the game's core integrity guarantee (see outcomePlan.ts). This
+ * break the game's core integrity guarantee (see odds/outcomePlan.ts). This
  * type only comes from BulbGameEngine.getAuditRecord(), a distinctly-named
  * method so the "this is server-only, never forward it" boundary is
  * explicit in the API itself, not just a comment.
@@ -114,11 +120,22 @@ export interface CycleSnapshot {
 export interface CycleAuditRecord {
   cycleId: string;
   bulbCount: BulbCount;
-  shape: ProbabilityShape;
-  /** Each bulb's original assigned win probability, keyed by bulb id. */
-  probabilities: Record<string, number>;
-  fixedCoefficients: Record<string, number>;
   winningBulbId: string;
   /** Full pop order for every bulb except the winner. Sensitive — see above. */
   eliminationOrder: string[];
+  /** Total stake per bulb, locked the instant betting closed. Empty until
+   *  then. Keyed by bulb id. */
+  finalStakeByBulbId: Record<string, number>;
+  /** The house-cut fraction actually used for this cycle's pricing — stored
+   *  per-cycle (not just read from current config) so a later config change
+   *  can't retroactively make an old cycle's payouts look wrong. */
+  houseCutRate: number;
+  /** One entry per round resolved so far, in order. */
+  roundPoolHistory: RoundPoolRecord[];
+  /** Present only if this cycle was auto-cancelled as uncontested (fewer
+   *  than 2 bulbs received any stake) — refunded in full, no round played. */
+  cancelled?: {
+    reason: 'uncontested';
+    contestedBulbCount: number;
+  };
 }

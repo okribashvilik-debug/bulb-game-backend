@@ -2,7 +2,7 @@
  * BulbGameEngine — the game logic layer for "Bulb Game".
  *
  * This is an explicit state machine. Every state transition is a named
- * method (`closeBetting`, `resolveRound`, `advanceToNextRound`, ...) that
+ * method (`closeBetting`, `finishCalculating`, `resolveRound`, ...) that
  * mutates state directly. Timers never touch state themselves — each timer
  * is a "safety cap" that simply calls the same transition method that an
  * explicit game event would call. A `generation` counter makes those safety
@@ -11,7 +11,8 @@
  *
  * States (see GameState in ./types):
  *
- *   idle --startCycle--> betting --closeBetting--> round_active
+ *   idle --startCycle--> betting --closeBetting--> calculating
+ *     --finishCalculating (contested)--> round_active
  *     --resolveRound--> [round_active again]  (repeats bulbCount-1 times,
  *                        skipping straight to the next round unless the
  *                        alive count just hit a checkpoint — see
@@ -19,23 +20,30 @@
  *                     \-> decision_window --advanceToNextRound--> round_active
  *     --resolveRound (last alive bulb)--> cycle_complete --startCycle--> betting
  *
+ *     --finishCalculating (uncontested, <2 bulbs staked)--> cycle_cancelled
+ *       (refunded; the caller — GameSession — restarts a fresh cycle)
+ *
  * No payout/odds math lives here — this class only talks to an
- * `OddsProvider` (see ./odds/FixedOddsEngine.ts), the swappable module that
- * owns the fixed-odds model. `startCycle` asks it to plan and seal the
- * entire cycle's outcome (winner + elimination order) up front; every pop
- * in `resolveRound` just reveals the next step of that sealed plan rather
- * than rolling anything live.
+ * `OddsProvider` (see ./odds/PariMutuelEngine.ts), the swappable module that
+ * owns the pari-mutuel model. `startCycle` asks it to decide the winner and
+ * full elimination order up front (a fair, stake-independent shuffle —
+ * nothing about the pool influences the outcome); every pop in
+ * `resolveRound` just reveals the next step of that sealed order. Pricing
+ * (who gets paid how much) is a completely separate concern, computed live
+ * from real stakes only once betting has closed — see
+ * `computeLiveCoefficients` below.
  *
  * Every phase duration is a fixed constant (BETTING_WINDOW_MS,
- * ROUND_DURATION_MS, CASHOUT_WINDOW_MS below) — no randomized ranges, no
- * randomness left in this class at all. All randomness for a cycle's
- * *outcome* lives in the odds provider (see startCycle).
+ * CALCULATING_WINDOW_MS, ROUND_DURATION_MS, CASHOUT_WINDOW_MS below) — no
+ * randomized ranges. All randomness for a cycle's *outcome* (not its
+ * pricing) lives in the odds provider (see startCycle).
  */
 
 import { isCashOutCheckpoint } from './checkpoints';
 import { defaultClock, type Clock, type TimerHandle } from './clock';
 import { TinyEmitter, type BulbGameEvents } from './events';
-import { FixedOddsEngine, type OddsProvider } from './odds/FixedOddsEngine';
+import { computeEliminatedPool, totalStakeByBulbId } from './odds/parimutuel';
+import { PariMutuelEngine, type OddsProvider } from './odds/PariMutuelEngine';
 import type { CycleOutcomePlan } from './odds/outcomePlan';
 import type {
   Bulb,
@@ -45,13 +53,18 @@ import type {
   CycleTimings,
   GameState,
   Player,
+  RoundPoolRecord,
 } from './types';
 
 const ALLOWED_BULB_COUNTS: BulbCount[] = [5, 7, 10];
 
 /** Named, fixed pacing constants — retune the game's feel by editing these
- *  three values only, never by touching state-machine logic. */
+ *  values only, never by touching state-machine logic. */
 const BETTING_WINDOW_MS = 10_000;
+/** Betting has closed and stakes are locked; odds are computed but not yet
+ *  revealed — a fixed pause so "no coefficient can be shown before betting
+ *  closes" (nothing to price yet) reads as a deliberate beat, not a glitch. */
+const CALCULATING_WINDOW_MS = 3_000;
 const ROUND_DURATION_MS = 5_000;
 const CASHOUT_WINDOW_MS = 5_000;
 
@@ -64,7 +77,7 @@ const DEFAULT_TIMINGS: CycleTimings = {
 export interface BulbGameEngineOptions {
   clock?: Clock;
   timings?: Partial<CycleTimings>;
-  /** Defaults to a FixedOddsEngine with default odds config. Injectable so
+  /** Defaults to a PariMutuelEngine with default odds config. Injectable so
    *  the whole odds model can be swapped, or a scripted one used in tests. */
   oddsProvider?: OddsProvider;
 }
@@ -93,13 +106,19 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
   private totalRounds = 0;
   private winningBulbId: string | undefined;
 
-  /** The sealed outcome plan for the current cycle — winner, full
-   *  elimination order, and every bulb's precomputed survival curve,
-   *  decided before betting even opens. resolveRound() only ever reveals
-   *  the next elimination-order entry, never generates a new one. Nothing
-   *  about cash-out pricing is recomputed after a pop — see
-   *  computeLiveCoefficients() below. */
-  private outcomePlan: CycleOutcomePlan | undefined;
+  /** Winner + full elimination order, decided synchronously before betting
+   *  even opens — see PariMutuelEngine.planOutcome(). resolveRound() only
+   *  ever reveals the next elimination-order entry, never generates one. */
+  private outcome: CycleOutcomePlan | undefined;
+
+  /** Total stake per bulb, locked the instant betting closes (start of the
+   *  'calculating' phase) — the audit-trail record of exactly what every
+   *  round's pricing was computed from. Undefined until then. */
+  private finalStakeByBulbId: Map<string, number> | undefined;
+  /** One entry per round resolved so far this cycle — see RoundPoolRecord. */
+  private roundPoolHistory: RoundPoolRecord[] = [];
+  /** Set only when finishCalculating() finds the round uncontested. */
+  private cancelledInfo: CycleAuditRecord['cancelled'];
 
   /** Player ids that have made an explicit decision (cash out or continue)
    *  in the current decision window — lets that window end the instant
@@ -121,7 +140,7 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     super();
     this.clock = options.clock ?? defaultClock;
     this.timings = { ...DEFAULT_TIMINGS, ...options.timings };
-    this.oddsProvider = options.oddsProvider ?? new FixedOddsEngine();
+    this.oddsProvider = options.oddsProvider ?? new PariMutuelEngine();
   }
 
   // ---------------------------------------------------------------------
@@ -155,8 +174,6 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
       currentRound: this.currentRound,
       totalRounds: this.totalRounds,
       winningBulbId: this.winningBulbId,
-      shape: this.outcomePlan?.shape,
-      fixedCoefficients: mapToRecord(this.outcomePlan?.fixedCoefficientByBulbId),
       liveCoefficients: mapToRecord(this.computeLiveCoefficients()),
       phaseDeadlineAt: this.phaseDeadlineAt,
       phaseDurationMs: this.phaseDurationMs,
@@ -168,48 +185,39 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
    * order — deliberately absent from getSnapshot()/CycleSnapshot, since
    * broadcasting the future pop sequence to clients would break the
    * game's core integrity guarantee. This method exists for a server-side
-   * caller to persist to an audit trail (e.g. Supabase) right after
-   * startCycle(); its distinct name and return type are the boundary —
-   * never forward this value to a client.
+   * caller to persist to an audit trail (e.g. Supabase); its distinct name
+   * and return type are the boundary — never forward this value to a client.
    */
   getAuditRecord(): CycleAuditRecord | undefined {
-    if (!this.outcomePlan) return undefined;
+    if (!this.outcome) return undefined;
     return {
       cycleId: this.cycleId,
       bulbCount: this.bulbCount,
-      shape: this.outcomePlan.shape,
-      probabilities: mapToRecord(this.outcomePlan.probabilityByBulbId),
-      fixedCoefficients: mapToRecord(this.outcomePlan.fixedCoefficientByBulbId),
-      winningBulbId: this.outcomePlan.winningBulbId,
-      eliminationOrder: [...this.outcomePlan.eliminationOrder],
+      winningBulbId: this.outcome.winningBulbId,
+      eliminationOrder: [...this.outcome.eliminationOrder],
+      finalStakeByBulbId: mapToRecord(this.finalStakeByBulbId),
+      houseCutRate: this.oddsProvider.houseCutRate,
+      roundPoolHistory: this.roundPoolHistory.map((r) => ({ ...r })),
+      cancelled: this.cancelledInfo,
     };
   }
 
-  /** Round-by-round cash-out coefficients for currently-alive bulbs, for
-   *  "if you cash out right now" display. A cheap on-demand lookup, not
-   *  stored as mutable state — under the new survival-curve model nothing
-   *  needs recomputing after a pop, because a bulb's cash-out value never
-   *  depends on which OTHER specific bulbs happened to pop (see
-   *  odds/survivalCurves.ts). Empty before round 1 starts (betting has no
-   *  cash-out concept; the UI falls back to fixedCoefficients then). */
+  /** Live pari-mutuel coefficients for currently-alive, currently-staked
+   *  bulbs — see odds/parimutuel.ts. Nothing can be priced until stakes
+   *  are final, so this is empty before the 'calculating' phase finishes. */
   private computeLiveCoefficients(): Map<string, number> {
-    const coefficients = new Map<string, number>();
-    if (!this.outcomePlan || this.currentRound === 0) return coefficients;
-
-    const lookupRound = this.currentRound + 1;
-    for (const bulb of this.bulbs) {
-      if (bulb.status !== 'alive') continue;
-      coefficients.set(bulb.id, this.oddsProvider.cashOutCoefficient(this.outcomePlan, bulb.id, lookupRound));
+    if (this.state === 'idle' || this.state === 'betting' || this.state === 'calculating') {
+      return new Map();
     }
-    return coefficients;
+    return this.oddsProvider.liveCoefficients(this.bulbs, this.players);
   }
 
   // ---------------------------------------------------------------------
-  // Transition: idle | cycle_complete -> betting
+  // Transition: idle | cycle_complete | cycle_cancelled -> betting
   // ---------------------------------------------------------------------
 
   startCycle(bulbCount: BulbCount): void {
-    if (this.state !== 'idle' && this.state !== 'cycle_complete') {
+    if (this.state !== 'idle' && this.state !== 'cycle_complete' && this.state !== 'cycle_cancelled') {
       throw new Error(`Cannot start a new cycle while state is "${this.state}"`);
     }
     if (!ALLOWED_BULB_COUNTS.includes(bulbCount)) {
@@ -226,14 +234,19 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     this.currentRound = 0;
     this.totalRounds = bulbCount - 1;
     this.winningBulbId = undefined;
+    this.finalStakeByBulbId = undefined;
+    this.roundPoolHistory = [];
+    this.cancelledInfo = undefined;
     this.decidedPlayerIds.clear();
 
-    // Integrity-critical: the winner and the full elimination order are
+    // Integrity-critical: WHO wins and the full elimination order are
     // decided right now — before betting opens, let alone closes, and
-    // before a single round runs. Everything from here on just reveals
-    // this sealed plan one pop at a time.
+    // before a single round runs. This is a fair, stake-independent
+    // shuffle (see odds/outcomePlan.ts): pari-mutuel pricing must never be
+    // able to steer the outcome, only price it. Everything from here on
+    // just reveals this sealed order one pop at a time.
     const bulbIds = this.bulbs.map((b) => b.id);
-    this.outcomePlan = this.oddsProvider.planCycle(bulbIds);
+    this.outcome = this.oddsProvider.planOutcome(bulbIds);
 
     this.transitionTo('betting');
     this.scheduleSafetyTimer(this.timings.bettingWindowMs, () => this.closeBetting());
@@ -264,10 +277,47 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
   }
 
   /** Explicit early-close hook (e.g. a host action). The betting-window
-   *  timer also calls this — whichever happens first wins. */
+   *  timer also calls this — whichever happens first wins. No bets are
+   *  accepted after this point under any circumstance (placeBet() requires
+   *  state === 'betting', which this transition ends). */
   closeBetting(): void {
     if (this.state !== 'betting') return; // stale timer or duplicate call
+    this.transitionTo('calculating');
+    this.scheduleSafetyTimer(CALCULATING_WINDOW_MS, () => this.finishCalculating());
+    this.emitStateChange();
+    this.emit('calculatingStarted', { durationMs: CALCULATING_WINDOW_MS });
+  }
+
+  /** Stakes are now final and locked. Decide whether this cycle actually
+   *  has a contest to run — a round needs at least two DIFFERENT bulbs
+   *  staked on, or there's no losing pool for pari-mutuel pricing to
+   *  redistribute at all. */
+  finishCalculating(): void {
+    if (this.state !== 'calculating') return; // stale timer or duplicate call
+
+    this.finalStakeByBulbId = totalStakeByBulbId(this.players);
+    const contestedBulbCount = this.finalStakeByBulbId.size;
+
+    if (contestedBulbCount < 2) {
+      this.cancelCycle(contestedBulbCount);
+      return;
+    }
+
     this.beginRound(1);
+  }
+
+  /** Uncontested round: refund everyone in full, no round played. The
+   *  caller (GameSession) is responsible for starting a fresh cycle —
+   *  mirroring how it already restarts after a normal cycle_complete, this
+   *  engine only ever transitions itself forward via startCycle(), never
+   *  calls it from inside its own state machine. */
+  private cancelCycle(contestedBulbCount: number): void {
+    const refundedPlayers = this.players.map((p) => ({ ...p }));
+    this.cancelledInfo = { reason: 'uncontested', contestedBulbCount };
+
+    this.transitionTo('cycle_cancelled');
+    this.emitStateChange();
+    this.emit('cycleCancelled', { reason: 'uncontested', refundedPlayers });
   }
 
   // ---------------------------------------------------------------------
@@ -291,7 +341,7 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
   resolveRound(): void {
     if (this.state !== 'round_active') return; // stale timer or duplicate call
 
-    const poppedBulbId = this.outcomePlan!.eliminationOrder[this.currentRound - 1];
+    const poppedBulbId = this.outcome!.eliminationOrder[this.currentRound - 1];
     const popped = this.bulbs.find((b) => b.id === poppedBulbId);
     if (!popped || popped.status !== 'alive') {
       // The sealed plan and the live bulb list have desynced — this is a
@@ -302,6 +352,13 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     }
     popped.status = 'popped';
     popped.poppedInRound = this.currentRound;
+
+    const eliminatedPool = computeEliminatedPool(this.bulbs, this.finalStakeByBulbId!);
+    this.roundPoolHistory.push({
+      round: this.currentRound,
+      eliminatedPool,
+      distributablePool: (1 - this.oddsProvider.houseCutRate) * eliminatedPool,
+    });
 
     const affectedPlayers = this.players.filter(
       (p) => p.bulbId === popped.id && p.status === 'active',
@@ -384,12 +441,15 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     }
     const player = this.requireActiveUndecidedPlayer(playerId);
 
-    // Cashing out mid-cycle is priced from the player's bulb's OWN
-    // precomputed survival curve — round-by-round, per-bulb-independent
-    // (see odds/survivalCurves.ts) — not the fixed cycle-start coefficient,
-    // and not affected by which other specific bulbs happened to pop.
-    const coefficient = this.oddsProvider.cashOutCoefficient(this.outcomePlan!, player.bulbId, this.currentRound + 1);
-    const value = this.oddsProvider.cashoutValue(player.stake, coefficient);
+    // Priced from the SAME live pari-mutuel formula as everything else —
+    // see odds/parimutuel.ts. No separate "fixed coefficient" exists.
+    const coefficient = this.computeLiveCoefficients().get(player.bulbId);
+    if (coefficient === undefined) {
+      // Can't happen in practice: an active decider has stake on this bulb
+      // by definition, so it always has a coefficient by now.
+      throw new Error(`No live coefficient available for bulb "${player.bulbId}"`);
+    }
+    const value = this.oddsProvider.payoutValue(player.stake, coefficient);
 
     player.status = 'cashed_out';
     player.result = { round: this.currentRound, value };
@@ -447,12 +507,12 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
   // ---------------------------------------------------------------------
 
   private endCycle(winningBulbId: string | undefined): void {
-    if (winningBulbId !== undefined && winningBulbId !== this.outcomePlan?.winningBulbId) {
+    if (winningBulbId !== undefined && winningBulbId !== this.outcome?.winningBulbId) {
       // The sole survivor must always be the bulb decided in startCycle();
       // anything else means the elimination order and round count desynced.
       throw new Error(
         `Internal consistency error: sole survivor "${winningBulbId}" does not match ` +
-          `planned winner "${this.outcomePlan?.winningBulbId}"`,
+          `planned winner "${this.outcome?.winningBulbId}"`,
       );
     }
 
@@ -464,14 +524,13 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
       ? this.players.filter((p) => p.bulbId === winningBulbId && p.status === 'active')
       : [];
 
+    // Priced from the exact same formula as every mid-round cash-out — at
+    // this point every bulb except the winner is 'popped', so eliminated_pool
+    // covers the whole losing field and this one lookup IS the win payout.
+    const finalCoefficients = this.computeLiveCoefficients();
     for (const player of winners) {
-      // Natural resolution (never cashed out) pays the FIXED coefficient
-      // locked in at cycle start — this is the "fixed-odds" guarantee: a
-      // bettor who rides a bulb to the win gets HOUSE_RTP / original
-      // probability, regardless of how the live coefficient decayed as
-      // competitors were eliminated.
-      const coefficient = this.outcomePlan!.fixedCoefficientByBulbId.get(player.bulbId)!;
-      const value = this.oddsProvider.cashoutValue(player.stake, coefficient);
+      const coefficient = finalCoefficients.get(player.bulbId)!;
+      const value = this.oddsProvider.payoutValue(player.stake, coefficient);
       player.status = 'won';
       player.result = { round: this.currentRound, value };
     }
