@@ -1,0 +1,20 @@
+# Render Blueprint — optional, but lets you deploy via "New +" -> "Blueprint"
+# pointing at this repo instead of clicking through the web-service form by
+# hand. SUPABASE_URL / SUPABASE_SERVICE_KEY are marked sync: false, meaning
+# Render will prompt you to enter them (as secrets) rather than storing
+# them in this file — never put the actual key here.
+services:
+  - type: web
+    name: bulb-game-server
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      # PORT is provided automatically by Render — do not set it here.
