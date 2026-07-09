@@ -14,11 +14,12 @@
  * no per-client polling or per-client timer driving game logic.
  */
 import type { WebSocket } from 'ws';
-import { BulbGameEngine, type BulbCount, type BulbGameEvents, type CycleSnapshot } from '../../src/index';
+import { BulbGameEngine, type BulbCount, type BulbGameEvents, type CycleSnapshot, type Player } from '../../src/index';
 import { placeBet as placeBetRpc, resolveBet, voidBet, InsufficientBalanceError } from '../db/betsRepo';
 import { markBettingClosed, markCycleCancelled, markCycleComplete, insertCycle } from '../db/cyclesRepo';
 import { insertLiveBetEvent } from '../db/liveBetsRepo';
 import { getPlayerBalance } from '../db/playersRepo';
+import { BotController } from './bots';
 
 const AUTO_RESTART_DELAY_MS = 4_500;
 /** An uncontested/cancelled cycle has nothing to linger on (no winner to
@@ -62,10 +63,12 @@ export class GameSession {
   private displayNameByPlayerId = new Map<string, string>();
   private restartTimer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
+  private readonly bots: BotController;
 
   constructor(mode: BulbCount) {
     this.mode = mode;
     this.engine = new BulbGameEngine();
+    this.bots = new BotController(this.engine);
 
     this.engine.on('stateChange', ({ snapshot }) => this.broadcastSnapshot(snapshot));
     for (const eventName of BROADCAST_EVENT_NAMES) {
@@ -82,6 +85,11 @@ export class GameSession {
     this.engine.on('bulbPopped', (payload) => void this.handleBulbPopped(payload));
     this.engine.on('playerCashedOut', (payload) => void this.handlePlayerCashedOut(payload));
     this.engine.on('cycleComplete', (payload) => void this.handleCycleComplete(payload));
+    // Bots skip placeBet() entirely (no real balance to debit) — this is
+    // the only place their bet placement ever reaches the live_bets feed.
+    this.engine.on('betPlaced', ({ player }) => {
+      if (this.bots.isBot(player.id)) void this.handleBotBetPlaced(player);
+    });
   }
 
   /** Boots this session's first cycle. Called once per mode, at server
@@ -97,6 +105,7 @@ export class GameSession {
   shutdown(): void {
     this.stopped = true;
     if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.bots.dispose();
     this.engine.stop();
   }
 
@@ -259,6 +268,24 @@ export class GameSession {
     }
   }
 
+  /** A bot placed a bet — real pari-mutuel pool money as far as the engine
+   *  is concerned, but no real player to debit, so this is the only write
+   *  it ever gets: a feed row with a null player_id (the schema supports
+   *  this — see live_bets in supabase/schema.sql) so the activity still
+   *  shows up for anyone who joins or reloads after the fact. */
+  private async handleBotBetPlaced(player: Player): Promise<void> {
+    insertLiveBetEvent({
+      cycleId: this.currentCycleDbId,
+      mode: this.mode,
+      playerId: null,
+      displayName: player.id,
+      bulbId: player.bulbId,
+      stake: player.stake,
+      payout: null,
+      eventType: 'bet_placed',
+    }).catch((err) => this.logError('insertLiveBetEvent(bot bet_placed)', err));
+  }
+
   /** Uncontested round (fewer than 2 bulbs staked) — refund everyone in
    *  full, mark the cycle row cancelled, and start a fresh cycle almost
    *  immediately (see CANCELLED_RESTART_DELAY_MS). */
@@ -274,7 +301,7 @@ export class GameSession {
       insertLiveBetEvent({
         cycleId: cycleDbId,
         mode: this.mode,
-        playerId: player.id,
+        playerId: this.bots.isBot(player.id) ? null : player.id,
         displayName: this.displayNameByPlayerId.get(player.id) ?? player.id,
         bulbId: player.bulbId,
         stake: player.stake,
@@ -306,7 +333,7 @@ export class GameSession {
       insertLiveBetEvent({
         cycleId: this.currentCycleDbId,
         mode: this.mode,
-        playerId: player.id,
+        playerId: this.bots.isBot(player.id) ? null : player.id,
         displayName: this.displayNameByPlayerId.get(player.id) ?? player.id,
         bulbId: player.bulbId,
         stake: player.stake,
@@ -338,7 +365,7 @@ export class GameSession {
     insertLiveBetEvent({
       cycleId: this.currentCycleDbId,
       mode: this.mode,
-      playerId: player.id,
+      playerId: this.bots.isBot(player.id) ? null : player.id,
       displayName: this.displayNameByPlayerId.get(player.id) ?? player.id,
       bulbId: player.bulbId,
       stake: player.stake,
@@ -377,7 +404,7 @@ export class GameSession {
       insertLiveBetEvent({
         cycleId: cycleDbId,
         mode: this.mode,
-        playerId: winner.id,
+        playerId: this.bots.isBot(winner.id) ? null : winner.id,
         displayName: this.displayNameByPlayerId.get(winner.id) ?? winner.id,
         bulbId: winner.bulbId,
         stake: winner.stake,
