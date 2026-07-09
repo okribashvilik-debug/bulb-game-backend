@@ -29,15 +29,17 @@ const BOT_NAME_POOL = [
 
 const STAKE_POOL = [1, 2, 5, 10, 20, 25, 50, 100];
 
+/** `items` must be non-empty — every caller here passes a fixed, non-empty
+ *  pool (bulb list, name pool, stake pool). */
 function pick<T>(items: readonly T[]): T {
-  return items[Math.floor(Math.random() * items.length)];
+  return items[Math.floor(Math.random() * items.length)]!;
 }
 
 function shuffled<T>(items: readonly T[]): T[] {
   const copy = [...items];
   for (let i = copy.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
+    [copy[i], copy[j]] = [copy[j]!, copy[i]!];
   }
   return copy;
 }

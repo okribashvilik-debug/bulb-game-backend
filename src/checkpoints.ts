@@ -3,18 +3,25 @@
  * bulb-count mode. Configurable data, not inline conditionals — retune by
  * editing this table only, nothing else needs to change.
  *
+ * Currently every round after the first pop offers one (every alive count
+ * from bulbCount-1 down to 2 — the last pop always leaves exactly the
+ * winner, which ends the cycle directly rather than opening a window).
  * Shared between BulbGameEngine (which drives real gameplay off it) and
- * the RTP simulation harness (odds/rtpSimulation.ts), which needs to
- * simulate the exact same, now-restricted set of cash-out opportunities
- * to validate the payout guarantee under this checkpoint structure —
- * a single source of truth here keeps the two from drifting apart.
+ * the RTP simulation harness (odds/rtpSimulation.ts) — a single source of
+ * truth here keeps the two from drifting apart.
  */
 import type { BulbCount } from './types';
 
+function everyRoundAfterFirstPop(bulbCount: number): number[] {
+  const counts: number[] = [];
+  for (let alive = bulbCount - 1; alive >= 2; alive--) counts.push(alive);
+  return counts;
+}
+
 export const CHECKPOINTS_BY_BULB_COUNT: Readonly<Record<BulbCount, readonly number[]>> = {
-  5: [3],
-  7: [5, 3],
-  10: [6, 3],
+  5: everyRoundAfterFirstPop(5),
+  7: everyRoundAfterFirstPop(7),
+  10: everyRoundAfterFirstPop(10),
 };
 
 /** Whether a pop that leaves `aliveCount` bulbs standing, in a cycle of

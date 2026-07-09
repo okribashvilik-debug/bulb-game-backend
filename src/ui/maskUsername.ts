@@ -23,7 +23,7 @@ export function maskUsername(name: string): string {
   if (!name) return '*****';
 
   const hash = hashString(name);
-  const first = name[0].toUpperCase();
+  const first = name[0]!.toUpperCase(); // safe: the `!name` check above excludes ''
   const starCount = 3 + (hash % 4); // 3..6 asterisks
   const stars = '*'.repeat(starCount);
 
@@ -33,6 +33,7 @@ export function maskUsername(name: string): string {
   }
 
   const useDigit = (hash >> 5) % 2 === 0;
-  const trailing = useDigit ? String((hash >> 7) % 10) : name[name.length - 1].toUpperCase();
+  // safe: only reached when includeTrailing required name.length >= 2
+  const trailing = useDigit ? String((hash >> 7) % 10) : name[name.length - 1]!.toUpperCase();
   return `${first}${stars}${trailing}`;
 }

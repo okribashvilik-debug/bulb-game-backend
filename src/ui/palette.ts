@@ -26,5 +26,5 @@ export const BULB_PALETTE: readonly string[] = [
 
 export function getBulbColor(bulbId: string): string {
   const index = Number(bulbId.split('_')[1]) - 1;
-  return BULB_PALETTE[index % BULB_PALETTE.length];
+  return BULB_PALETTE[index % BULB_PALETTE.length]!; // bulb ids are always "bulb_<positive int>"
 }

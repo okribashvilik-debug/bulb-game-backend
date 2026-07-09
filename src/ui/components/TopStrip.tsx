@@ -9,7 +9,8 @@ const COLLAPSED_COUNT = 10;
 const EXPANDED_COUNT = 30;
 const BULB_COUNT_OPTIONS: BulbCount[] = [5, 7, 10];
 
-function coeffTier(coefficient: number): 1 | 2 | 3 | 4 {
+function coeffTier(coefficient: number | undefined): 1 | 2 | 3 | 4 {
+  if (coefficient === undefined) return 1;
   if (coefficient >= 15) return 4;
   if (coefficient >= 5) return 3;
   if (coefficient >= 2) return 2;
@@ -22,7 +23,9 @@ function OutcomeChip({ entry }: { entry: OutcomeHistoryEntry }) {
       <span className="outcome-chip__bulb" style={{ backgroundColor: getBulbColor(entry.bulbId) }}>
         {entry.bulbNumber}
       </span>
-      <span className="outcome-chip__coeff">{formatCoefficient(entry.coefficient)}</span>
+      {/* Nobody (not even a bot) staked on the winning bulb — a real,
+         valid outcome under uniform-random elimination, not an error. */}
+      <span className="outcome-chip__coeff">{entry.coefficient !== undefined ? formatCoefficient(entry.coefficient) : '—'}</span>
     </div>
   );
 }

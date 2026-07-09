@@ -27,7 +27,10 @@ export interface OutcomeHistoryEntry {
   cycleId: string;
   bulbId: string;
   bulbNumber: number;
-  coefficient: number;
+  /** Undefined when nobody (not even a bot) staked on the winning bulb —
+   *  a real, valid outcome under uniform-random elimination, not an error.
+   *  Never coerce this to 0 or any other fallback number. */
+  coefficient: number | undefined;
   bulbCount: BulbCount;
   timestamp: number;
 }

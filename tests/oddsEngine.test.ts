@@ -333,10 +333,10 @@ test('BulbGameEngine: after a cancellation, startCycle() can run again immediate
 // 5. Checkpoints + fixed timing — unaffected by the pricing-model swap
 // -------------------------------------------------------------------------
 
-test('checkpoints.ts: thresholds match the spec exactly for every bulb-count mode', () => {
-  assert.deepEqual(CHECKPOINTS_BY_BULB_COUNT[5], [3]);
-  assert.deepEqual(CHECKPOINTS_BY_BULB_COUNT[7], [5, 3]);
-  assert.deepEqual(CHECKPOINTS_BY_BULB_COUNT[10], [6, 3]);
+test('checkpoints.ts: a decision window opens after every round (every alive count down to 2)', () => {
+  assert.deepEqual(CHECKPOINTS_BY_BULB_COUNT[5], [4, 3, 2]);
+  assert.deepEqual(CHECKPOINTS_BY_BULB_COUNT[7], [6, 5, 4, 3, 2]);
+  assert.deepEqual(CHECKPOINTS_BY_BULB_COUNT[10], [9, 8, 7, 6, 5, 4, 3, 2]);
 });
 
 function driveCycleAndRecordCheckpoints(bulbCount: 5 | 7 | 10): number[] {

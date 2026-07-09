@@ -66,7 +66,7 @@ export function runPariMutuelSimulation(options: {
     const stakes = scenario.generateStakes(bulbCount, rng);
     const players: Player[] = stakes.map((s, i) => ({
       id: `p${i}`,
-      bulbId: bulbIds[s.bulbIndex],
+      bulbId: bulbIds[s.bulbIndex]!, // scenario generators always produce an in-range index
       stake: s.stake,
       status: 'active' as const,
     }));
@@ -118,7 +118,7 @@ export function runPariMutuelSimulation(options: {
 
 function randomStake(rng: RandomSource): number {
   const pool = [1, 2, 5, 10, 20, 25, 50, 100];
-  return pool[Math.floor(rng.next() * pool.length)];
+  return pool[Math.floor(rng.next() * pool.length)]!; // index always in range
 }
 
 /** Every bulb gets exactly one bettor, evenly spread, stakes randomized. */

@@ -29,7 +29,8 @@ export function planCycleOutcome(bulbIds: string[], rng: RandomSource): CycleOut
   }
 
   const shuffled = shuffle(bulbIds, rng);
-  const [winningBulbId, ...eliminationOrder] = shuffled;
+  // Safe: the length guard above ensures shuffled has at least 2 entries.
+  const [winningBulbId, ...eliminationOrder] = shuffled as [string, ...string[]];
 
   return { winningBulbId, eliminationOrder };
 }
@@ -39,7 +40,7 @@ function shuffle<T>(items: T[], rng: RandomSource): T[] {
   const copy = [...items];
   for (let i = copy.length - 1; i > 0; i--) {
     const j = Math.floor(rng.next() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
+    [copy[i], copy[j]] = [copy[j]!, copy[i]!];
   }
   return copy;
 }

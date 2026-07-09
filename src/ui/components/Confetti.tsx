@@ -25,7 +25,7 @@ export function Confetti({ token }: { token: number }) {
         delay: Math.random() * 0.3,
         duration: 1.6 + Math.random() * 0.9,
         rotation: Math.random() * 360,
-        color: BULB_PALETTE[Math.floor(Math.random() * BULB_PALETTE.length)],
+        color: BULB_PALETTE[Math.floor(Math.random() * BULB_PALETTE.length)]!,
         drift: (Math.random() - 0.5) * 120,
       })),
     // Regenerated only when the win pulse fires again (new token).

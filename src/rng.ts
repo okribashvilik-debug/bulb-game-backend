@@ -21,7 +21,7 @@ export function pickRandom<T>(items: T[], rng: RandomSource): T {
     throw new Error('pickRandom: cannot pick from an empty array');
   }
   const index = Math.floor(rng.next() * items.length);
-  return items[index];
+  return items[index]!; // in range: items is non-empty and index < items.length
 }
 
 /** Draws a random float within an inclusive [min, max] range. */
