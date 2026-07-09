@@ -9,7 +9,9 @@
  * Run on Render: npm start           (same tsx entry point; PORT comes
  *                                      from Render's own env var)
  */
+import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 
@@ -25,10 +27,6 @@ app.use(express.json());
 // Render (and most PaaS platforms) probes this to know the service is up.
 app.get('/healthz', (_req, res) => {
   res.status(200).json({ status: 'ok', uptimeSeconds: process.uptime() });
-});
-
-app.get('/', (_req, res) => {
-  res.status(200).json({ name: 'bulb-game-server', status: 'running' });
 });
 
 // A small REST fallback alongside the WebSocket `requestLeaderboard`
@@ -48,6 +46,26 @@ app.get('/api/leaderboard', async (req, res) => {
     res.status(502).json({ error: 'Could not load leaderboard.' });
   }
 });
+
+// Serves the built React client (see package.json's "build" script) so
+// one Render service hosts both the API/WebSocket backend and the game
+// itself at a single URL. Guarded by existsSync so `npm run server:dev`
+// still works locally even when the client hasn't been built into dist/.
+const clientDistPath = path.join(__dirname, '..', '..', 'dist');
+if (fs.existsSync(clientDistPath)) {
+  app.use(express.static(clientDistPath));
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' || req.path.startsWith('/api') || req.path === '/healthz' || req.path === '/ws') {
+      next();
+      return;
+    }
+    res.sendFile(path.join(clientDistPath, 'index.html'));
+  });
+} else {
+  app.get('/', (_req, res) => {
+    res.status(200).json({ name: 'bulb-game-server', status: 'running', note: 'client build not found — run `npm run build`' });
+  });
+}
 
 const httpServer = http.createServer(app);
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });

@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useGame } from '../GameContext';
 import { formatCurrency } from '../format';
-import { HUMAN_PLAYER_ID } from '../useBulbGame';
 
 type Window = 'day' | 'week' | 'month';
 
@@ -14,7 +13,7 @@ const WINDOW_MS: Record<Window, number> = {
 const WINDOW_LABEL: Record<Window, string> = { day: 'Day', week: 'Week', month: 'Month' };
 
 export function Leaderboard() {
-  const { resolvedBets } = useGame();
+  const { resolvedBets, myPlayerId } = useGame();
   const [window, setWindow] = useState<Window>('day');
 
   const ranked = useMemo(() => {
@@ -51,7 +50,7 @@ export function Leaderboard() {
             #{index + 1}
           </span>
           <span className="leaderboard-row__name">
-            {entry.playerId === HUMAN_PLAYER_ID ? 'You' : entry.playerId}
+            {entry.playerId === myPlayerId ? 'You' : entry.playerId}
           </span>
           <span
             className="leaderboard-row__profit"

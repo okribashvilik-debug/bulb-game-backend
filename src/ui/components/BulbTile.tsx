@@ -1,26 +1,27 @@
 import type { Bulb, CycleSnapshot } from '../../types';
 import { bulbNumber, formatCoefficient } from '../format';
 import { getBulbColor } from '../palette';
-import { HUMAN_PLAYER_ID, type JustPopped, type NearMiss } from '../useBulbGame';
+import type { JustPopped, NearMiss } from '../useBulbGame';
 import { PopBurst } from './PopBurst';
 
 interface BulbTileProps {
   bulb: Bulb;
   snapshot: CycleSnapshot;
+  myPlayerId: string | null;
   justPopped: JustPopped | null;
   nearMiss: NearMiss | null;
 }
 
-export function BulbTile({ bulb, snapshot, justPopped, nearMiss }: BulbTileProps) {
+export function BulbTile({ bulb, snapshot, myPlayerId, justPopped, nearMiss }: BulbTileProps) {
   const isPopped = bulb.status === 'popped';
   const isCharging = !isPopped && snapshot.state === 'round_active';
   const visualState = isPopped ? 'popped' : isCharging ? 'charging' : 'alive';
 
   const isMine = snapshot.players.some(
-    (p) => p.id === HUMAN_PLAYER_ID && p.bulbId === bulb.id && (p.status === 'active' || p.status === 'won'),
+    (p) => p.id === myPlayerId && p.bulbId === bulb.id && (p.status === 'active' || p.status === 'won'),
   );
   const isWinner = snapshot.state === 'cycle_complete' && snapshot.winningBulbId === bulb.id;
-  const humanWon = isWinner && snapshot.players.some((p) => p.id === HUMAN_PLAYER_ID && p.status === 'won');
+  const humanWon = isWinner && snapshot.players.some((p) => p.id === myPlayerId && p.status === 'won');
 
   const isJustPopped = justPopped?.bulbId === bulb.id;
   const isNearMiss = nearMiss?.bulbId === bulb.id;

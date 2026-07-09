@@ -21,7 +21,7 @@ function densityClass(bulbCount: number): string {
 }
 
 export function MainEventArea() {
-  const { snapshot, justPopped, nearMiss, winPulse } = useGame();
+  const { snapshot, myPlayerId, justPopped, nearMiss, winPulse } = useGame();
   const { remainingMs, progress } = useCountdown(snapshot.phaseDeadlineAt, snapshot.phaseDurationMs);
 
   // Reserved near-miss "freeze frame": everything holds still for an
@@ -54,7 +54,14 @@ export function MainEventArea() {
       )}
       <div className={`bulb-grid ${densityClass(snapshot.bulbCount)} ${freeze ? 'bulb-grid--freeze' : ''}`}>
         {snapshot.bulbs.map((bulb) => (
-          <BulbTile key={bulb.id} bulb={bulb} snapshot={snapshot} justPopped={justPopped} nearMiss={nearMiss} />
+          <BulbTile
+            key={bulb.id}
+            bulb={bulb}
+            snapshot={snapshot}
+            myPlayerId={myPlayerId}
+            justPopped={justPopped}
+            nearMiss={nearMiss}
+          />
         ))}
       </div>
       {winPulse && <Confetti token={winPulse.token} />}

@@ -1,16 +1,15 @@
 import { useGame } from '../GameContext';
 import { bulbNumber, formatCoefficient, formatCurrency } from '../format';
 import { getBulbColor } from '../palette';
-import { HUMAN_PLAYER_ID } from '../useBulbGame';
 
 const QUICK_AMOUNTS = [1, 2, 5, 10] as const;
 const STAKE_STEP = 1;
 
 export function ControlPanel() {
-  const { snapshot, balance, selectedBulbId, setSelectedBulbId, stake, setStake, placeBet } = useGame();
+  const { snapshot, myPlayerId, balance, selectedBulbId, setSelectedBulbId, stake, setStake, placeBet } = useGame();
 
   const bettingOpen = snapshot.state === 'betting';
-  const humanPlayer = snapshot.players.find((p) => p.id === HUMAN_PLAYER_ID);
+  const humanPlayer = snapshot.players.find((p) => p.id === myPlayerId);
   const alreadyBet = humanPlayer !== undefined;
 
   const clampStake = (value: number) => Math.max(1, Math.min(Math.floor(balance) || 1, Math.floor(value)));

@@ -3,10 +3,9 @@ import { useGame } from '../GameContext';
 import { useCountdown } from '../useCountdown';
 import { bulbNumber, formatCoefficient, formatCurrency } from '../format';
 import { soundManager } from '../sound';
-import { HUMAN_PLAYER_ID } from '../useBulbGame';
 
 export function DecisionModal() {
-  const { snapshot, isDecisionPending, cashOut, continuePlaying } = useGame();
+  const { snapshot, myPlayerId, isDecisionPending, cashOut, continuePlaying } = useGame();
   const { remainingMs, progress } = useCountdown(snapshot.phaseDeadlineAt, snapshot.phaseDurationMs);
 
   // Distinct open/close cues for the decision window itself, separate from
@@ -24,7 +23,7 @@ export function DecisionModal() {
 
   if (!isDecisionPending) return null;
 
-  const humanPlayer = snapshot.players.find((p) => p.id === HUMAN_PLAYER_ID);
+  const humanPlayer = snapshot.players.find((p) => p.id === myPlayerId);
   if (!humanPlayer) return null;
 
   const coefficient = snapshot.liveCoefficients[humanPlayer.bulbId] ?? 0;

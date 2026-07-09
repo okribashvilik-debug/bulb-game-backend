@@ -1,7 +1,7 @@
 import { useGame } from '../GameContext';
 import { bulbNumber, formatCurrency, relativeTime } from '../format';
 import { getBulbColor } from '../palette';
-import { HUMAN_PLAYER_ID, type ResolvedBet } from '../useBulbGame';
+import type { ResolvedBet } from '../useBulbGame';
 
 const OUTCOME_LABEL: Record<ResolvedBet['outcome'], string> = {
   won: 'Won',
@@ -16,8 +16,8 @@ function amountClass(outcome: ResolvedBet['outcome']): string {
 }
 
 export function BetHistory() {
-  const { resolvedBets } = useGame();
-  const mine = resolvedBets.filter((bet) => bet.playerId === HUMAN_PLAYER_ID);
+  const { resolvedBets, myPlayerId } = useGame();
+  const mine = resolvedBets.filter((bet) => bet.playerId === myPlayerId);
 
   if (mine.length === 0) {
     return <div className="empty-state">Your resolved bets will show up here.</div>;
