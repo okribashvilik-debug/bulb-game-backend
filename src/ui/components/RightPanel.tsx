@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { BetHistory } from './BetHistory';
 import { Leaderboard } from './Leaderboard';
-import { LiveBetsFeed } from './LiveBetsFeed';
+import { LiveBetsFeed, LiveBetsSummary } from './LiveBetsFeed';
 
 type Tab = 'live' | 'history' | 'leaderboard';
 
@@ -27,6 +27,7 @@ export function RightPanel() {
           </button>
         ))}
       </div>
+      {tab === 'live' && <LiveBetsSummary />}
       <div className="right-panel__body">
         {tab === 'live' && <LiveBetsFeed />}
         {tab === 'history' && <BetHistory />}

@@ -608,6 +608,39 @@ button:disabled {
   border-bottom-color: var(--gold);
 }
 
+.live-bets-summary {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.live-bets-summary__stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 4px;
+}
+
+.live-bets-summary__stat + .live-bets-summary__stat {
+  border-left: 1px solid var(--line);
+}
+
+.live-bets-summary__value {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.live-bets-summary__label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+
 .right-panel__body {
   flex: 1;
   overflow-y: auto;
