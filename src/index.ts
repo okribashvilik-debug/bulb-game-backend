@@ -10,6 +10,7 @@ export type {
   CycleSnapshot,
   CycleTimings,
   GameState,
+  HouseTakeBreakdown,
   Player,
   PlayerResult,
   PlayerStatus,

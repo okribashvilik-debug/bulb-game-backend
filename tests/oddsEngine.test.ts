@@ -21,6 +21,16 @@
  *     players, concentrated stakes, uncontested) — a measurement, not a
  *     fixed target; asserts only that it never goes negative (never pays
  *     out more than the pool actually allows).
+ *  7. The "unclaimed pool" house-take breakdown (computeHouseTake()): a
+ *     cash-out is final, so if everyone on the winning bulb already left,
+ *     their share of the final pool has no claimant and stays with the
+ *     house on top of the standard cut.
+ *  8. The cash-out-behavior RTP harness (runCashOutBehaviorSimulation()):
+ *     reports a full house-take DISTRIBUTION (min/max/median/average), not
+ *     one average — including a deliberately-pinned test documenting that
+ *     house take can go negative once cash-outs land on multiple different
+ *     still-alive bulbs (not just the eventual winner), since every alive
+ *     bulb prices independently off the same distributable pool.
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -29,10 +39,17 @@ import { BulbGameEngine } from '../src/BulbGameEngine';
 import { CHECKPOINTS_BY_BULB_COUNT } from '../src/checkpoints';
 import type { Clock, TimerHandle } from '../src/clock';
 import { DEFAULT_ODDS_CONFIG } from '../src/odds/config';
-import { computeCoefficient, computeCoefficients } from '../src/odds/parimutuel';
+import { computeCoefficient, computeCoefficients, computeHouseTake } from '../src/odds/parimutuel';
 import { planCycleOutcome } from '../src/odds/outcomePlan';
 import { PariMutuelEngine } from '../src/odds/PariMutuelEngine';
-import { ALL_SCENARIOS, runPariMutuelSimulation } from '../src/odds/rtpSimulation';
+import {
+  ALL_SCENARIOS,
+  alwaysCashOutBehavior,
+  evenSpreadScenario,
+  neverCashOutBehavior,
+  runCashOutBehaviorSimulation,
+  runPariMutuelSimulation,
+} from '../src/odds/rtpSimulation';
 import { DefaultRandomSource, type RandomSource } from '../src/rng';
 import type { Bulb, Player } from '../src/types';
 
@@ -441,4 +458,194 @@ test('runPariMutuelSimulation: the fully-uncontested scenario cancels every cycl
 
 test('DEFAULT_ODDS_CONFIG: house cut rate is 5% by default', () => {
   assert.equal(DEFAULT_ODDS_CONFIG.houseCutRate, 0.05);
+});
+
+// -------------------------------------------------------------------------
+// 7. "Unclaimed pool" house-take breakdown — a cash-out is final, so if
+//    everyone on the winning bulb already left, their share of the pool has
+//    no claimant left and stays with the house on top of the standard cut.
+// -------------------------------------------------------------------------
+
+test('computeHouseTake: nobody left unclaimed -> unclaimedPool is 0, totalHouseTake is just the standard cut', () => {
+  // 100 staked on the losing pool, 5% cut -> 95 distributable; all 95 claimed.
+  const breakdown = computeHouseTake(100, 0.05, 95);
+  assert.equal(breakdown.standardCut, 5);
+  assert.equal(breakdown.distributablePool, 95);
+  assert.equal(breakdown.unclaimedPool, 0);
+  assert.equal(breakdown.totalHouseTake, 5);
+});
+
+test('computeHouseTake: nobody claims anything -> the WHOLE distributable pool is unclaimed, house keeps the full eliminated pool', () => {
+  const breakdown = computeHouseTake(100, 0.05, 0);
+  assert.equal(breakdown.standardCut, 5);
+  assert.equal(breakdown.distributablePool, 95);
+  assert.equal(breakdown.unclaimedPool, 95);
+  assert.equal(breakdown.totalHouseTake, 100); // = the full eliminatedPool
+});
+
+test('computeHouseTake: a partial claim leaves the remainder unclaimed', () => {
+  // 100 staked on the losing pool, 5% cut -> 95 distributable; only 50 of
+  // that 95 gets claimed -> 45 unclaimed, total take = 5 (standard) + 45.
+  const breakdown = computeHouseTake(100, 0.05, 50);
+  assert.equal(breakdown.unclaimedPool, 45);
+  assert.equal(breakdown.totalHouseTake, 50);
+});
+
+test('BulbGameEngine: nobody cashes out -> houseTake.unclaimedPool is ~0, claimedByWinners ~= distributablePool', () => {
+  const engine = new BulbGameEngine({ clock: manualClock, oddsProvider: new PariMutuelEngine(undefined, seededRng(31)) });
+  engine.startCycle(5);
+  for (let i = 1; i <= 5; i++) engine.placeBet(`p${i}`, `bulb_${i}`, 10);
+  engine.closeBetting();
+  engine.finishCalculating();
+
+  let round = 0;
+  while (engine.getState() !== 'cycle_complete') {
+    engine.resolveRound();
+    round += 1;
+    if (engine.getState() === 'decision_window') {
+      for (const p of engine.getSnapshot().players.filter((p) => p.status === 'active')) {
+        engine.continuePlaying(p.id);
+      }
+    }
+    assert.ok(round < 20, 'safety valve');
+  }
+
+  const houseTake = engine.getAuditRecord()!.houseTake!;
+  assert.ok(houseTake, 'expected a houseTake breakdown for a completed cycle');
+  assert.ok(Math.abs(houseTake.unclaimedPool) < 1e-9, `expected ~0 unclaimed, got ${houseTake.unclaimedPool}`);
+  assert.ok(
+    Math.abs(houseTake.totalHouseTake - houseTake.standardCut) < 1e-9,
+    'total take should equal just the standard cut when nothing goes unclaimed',
+  );
+});
+
+test('BulbGameEngine: the winning bulb\'s only bettor cashes out at the first opportunity -> the entire distributable pool goes unclaimed', () => {
+  const engine = new BulbGameEngine({ clock: manualClock, oddsProvider: new PariMutuelEngine(undefined, seededRng(17)) });
+  engine.startCycle(5);
+  for (let i = 1; i <= 5; i++) engine.placeBet(`p${i}`, `bulb_${i}`, 10);
+  engine.closeBetting();
+  engine.finishCalculating();
+
+  // The winner is sealed at startCycle() time — read it from the audit
+  // record (server/test-only) so we know which single player to cash out.
+  const winningBulbId = engine.getAuditRecord()!.winningBulbId;
+  const winningPlayerId = engine.getSnapshot().players.find((p) => p.bulbId === winningBulbId)!.id;
+
+  let round = 0;
+  let winnerCashedOut = false;
+  while (engine.getState() !== 'cycle_complete') {
+    engine.resolveRound();
+    round += 1;
+    if (engine.getState() === 'decision_window') {
+      for (const p of engine.getSnapshot().players.filter((p) => p.status === 'active')) {
+        if (p.id === winningPlayerId) {
+          engine.cashOut(p.id); // final and irrevocable — no further claim on this cycle
+          winnerCashedOut = true;
+        } else {
+          engine.continuePlaying(p.id);
+        }
+      }
+    }
+    assert.ok(round < 20, 'safety valve');
+  }
+
+  assert.ok(winnerCashedOut, 'the winning bulb\'s bettor must have had at least one decision window to cash out in');
+  const finalSnapshot = engine.getSnapshot();
+  assert.equal(
+    finalSnapshot.players.find((p) => p.id === winningPlayerId)!.status,
+    'cashed_out',
+    'a cashed-out player must not flip to "won" later, even though their bulb ended up winning',
+  );
+
+  const houseTake = engine.getAuditRecord()!.houseTake!;
+  assert.equal(houseTake.claimedByWinners, 0, 'nobody was left active on the winning bulb to claim anything');
+  assert.ok(
+    Math.abs(houseTake.unclaimedPool - houseTake.distributablePool) < 1e-9,
+    'with zero claimed, the ENTIRE distributable pool should be unclaimed',
+  );
+  assert.ok(
+    Math.abs(houseTake.totalHouseTake - houseTake.eliminatedPool) < 1e-9,
+    'with the whole distributable pool unclaimed, total house take should equal the full eliminated pool',
+  );
+  assert.ok(
+    houseTake.totalHouseTake > houseTake.standardCut,
+    'total take must exceed the flat 5% edge once something goes unclaimed',
+  );
+});
+
+test('BulbGameEngine: a cancelled (uncontested) cycle has no houseTake at all', () => {
+  const engine = new BulbGameEngine({ clock: manualClock, oddsProvider: new PariMutuelEngine(undefined, seededRng(6)) });
+  engine.startCycle(5);
+  engine.placeBet('p1', 'bulb_1', 10);
+  engine.closeBetting();
+  engine.finishCalculating();
+
+  assert.equal(engine.getState(), 'cycle_cancelled');
+  assert.equal(engine.getAuditRecord()!.houseTake, undefined);
+});
+
+// -------------------------------------------------------------------------
+// 8. RTP simulation harness — full house-take distribution under varying
+//    cash-out behavior, not just a single average.
+// -------------------------------------------------------------------------
+
+test('runCashOutBehaviorSimulation: "everyone cashes out early" produces a materially larger unclaimed-pool share than "nobody cashes out"', () => {
+  const behaviorNever = runCashOutBehaviorSimulation({
+    bulbCount: 5,
+    cycles: 3000,
+    scenario: evenSpreadScenario,
+    behavior: neverCashOutBehavior,
+    rng: seededRng(101),
+  });
+  const behaviorAlways = runCashOutBehaviorSimulation({
+    bulbCount: 5,
+    cycles: 3000,
+    scenario: evenSpreadScenario,
+    behavior: alwaysCashOutBehavior,
+    rng: seededRng(101),
+  });
+
+  assert.ok(
+    behaviorNever.unclaimedPoolShareOfVolume < 0.01,
+    `expected ~no unclaimed pool when nobody cashes out, got ${behaviorNever.unclaimedPoolShareOfVolume}`,
+  );
+  assert.ok(
+    behaviorAlways.unclaimedPoolShareOfVolume > 0.5,
+    `expected a large unclaimed-pool share once everyone cashes out early, got ${behaviorAlways.unclaimedPoolShareOfVolume}`,
+  );
+  // The flat edge itself is unaffected by cash-out behavior — only the
+  // unclaimed-pool component should move.
+  assert.ok(
+    Math.abs(behaviorNever.standardCutShareOfVolume - behaviorAlways.standardCutShareOfVolume) < 0.01,
+  );
+});
+
+test('runCashOutBehaviorSimulation: distribution.min/median/max bracket the average, and never diverge from the aggregate figure', () => {
+  for (const behavior of [neverCashOutBehavior, alwaysCashOutBehavior]) {
+    const result = runCashOutBehaviorSimulation({
+      bulbCount: 7,
+      cycles: 2000,
+      scenario: evenSpreadScenario,
+      behavior,
+      rng: seededRng(55),
+    });
+    assert.ok(result.distribution.min <= result.distribution.median + 1e-9);
+    assert.ok(result.distribution.median <= result.distribution.max + 1e-9);
+    assert.ok(result.distribution.min <= result.distribution.average + 1e-9);
+    assert.ok(result.distribution.average <= result.distribution.max + 1e-9);
+  }
+});
+
+test('runCashOutBehaviorSimulation: KNOWN characteristic, not a regression — cash-out windows are offered on every alive bulb every round, so once bettors on DIFFERENT (not just the winning) bulbs cash out at overlapping checkpoints, house take can go negative (pool pays out more than was wagered). This is a real property of the current "decision window after every round, on any alive bulb" design (see checkpoints.ts), surfaced here so it stays visible rather than silently assumed away.', () => {
+  const result = runCashOutBehaviorSimulation({
+    bulbCount: 7,
+    cycles: 3000,
+    scenario: evenSpreadScenario,
+    behavior: alwaysCashOutBehavior,
+    rng: seededRng(202),
+  });
+  assert.ok(
+    result.distribution.min < 0,
+    `expected at least one simulated cycle to show negative house take under this behavior pattern, got min=${result.distribution.min}`,
+  );
 });

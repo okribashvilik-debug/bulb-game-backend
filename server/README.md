@@ -216,6 +216,32 @@ leak every future pop in the cycle in advance.
   lifecycle (placed, resolved outcome, coefficient used, payout) is in
   `bets`. That's enough to independently re-derive any payout later, or run
   the scenario report (`npm run odds-report`) against real production data.
+- **House take is logged as two separate line items, not one blended
+  number**: a cash-out is final (see `PlayerStatus` in `src/types.ts`) — a
+  player who cashes out has no further claim on the cycle, win or lose. If
+  every bettor on the eventual winning bulb cashes out before the cycle
+  ends, their share of the final pool has no claimant left and stays with
+  the house on top of the standard edge. `cycles.standard_house_cut` (the
+  flat 5%-of-eliminated-pool edge) and `cycles.unclaimed_pool` (whatever
+  the winning bulb's stake left unclaimed) are written separately at cycle
+  completion — see `computeHouseTake()` in `src/odds/parimutuel.ts` — so
+  historical data can distinguish "the flat edge" from "unclaimed early
+  cash-outs" instead of only ever seeing one blended `total_house_take`.
+  `npm run odds-report` now also prints the full house-take DISTRIBUTION
+  (min/max/median/average, not just one average) across simulated cash-out
+  behavior patterns — see `runCashOutBehaviorSimulation()` in
+  `src/odds/rtpSimulation.ts`. That report's own output calls out an
+  important caveat: the 5% edge is a floor only for cash-outs concentrated
+  on the eventual winning bulb (the case this feature targets). Because a
+  decision window is offered after every round, on whichever bulbs happen
+  to still be alive — not only the eventual winner — cash-outs landing on
+  multiple *different* bulbs at overlapping checkpoints can push actual
+  house take below 5%, including negative, since `computeCoefficients()`
+  prices every still-alive bulb independently off the same distributable
+  pool. That is a real characteristic of the current model, not something
+  this change introduces or fixes (no change was made to
+  `live_coefficient`/`computeCoefficients` itself) — flagged here so it
+  stays visible for whoever next looks at cash-out economics.
 
 ## What this task did *not* include
 

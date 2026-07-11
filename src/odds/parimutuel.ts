@@ -17,7 +17,7 @@
  * undefined (division by zero) — callers must treat `undefined` as "blank,"
  * never coerce it to 0 or any other fallback number.
  */
-import type { Bulb, Player } from '../types';
+import type { Bulb, HouseTakeBreakdown, Player } from '../types';
 
 export function computeCoefficient(
   stakeOnBulb: number,
@@ -70,4 +70,38 @@ export function computeCoefficients(
     if (coefficient !== undefined) coefficients.set(bulb.id, coefficient);
   }
   return coefficients;
+}
+
+/**
+ * Splits a completed cycle's house take into the flat edge versus the
+ * portion left unclaimed because everyone eligible to claim it had already
+ * cashed out. A cash-out is final (see PlayerStatus) — a player who leaves
+ * has no further claim on the cycle. `claimedByWinners` is whatever the
+ * caller actually paid to still-active bettors on the winning bulb at
+ * settlement; anything the formula made available beyond that has no
+ * remaining claimant and stays with the house.
+ *
+ * This derives purely from numbers the caller already has (eliminatedPool
+ * + what was actually paid) — it does not recompute or alter the
+ * live_coefficient formula itself, it only accounts for what that formula
+ * already implies.
+ */
+export function computeHouseTake(
+  eliminatedPool: number,
+  houseCutRate: number,
+  claimedByWinners: number,
+): HouseTakeBreakdown {
+  const standardCut = houseCutRate * eliminatedPool;
+  const distributablePool = eliminatedPool - standardCut;
+  // Floors a hairline-negative float artifact to 0 — claimedByWinners can
+  // never legitimately exceed distributablePool by construction.
+  const unclaimedPool = Math.max(0, distributablePool - claimedByWinners);
+  return {
+    eliminatedPool,
+    standardCut,
+    distributablePool,
+    claimedByWinners,
+    unclaimedPool,
+    totalHouseTake: standardCut + unclaimedPool,
+  };
 }

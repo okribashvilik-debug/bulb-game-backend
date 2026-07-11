@@ -106,6 +106,44 @@ export interface RoundPoolRecord {
 }
 
 /**
+ * Breakdown of a completed cycle's total house take, computed once at cycle
+ * resolution (see computeHouseTake() in odds/parimutuel.ts). Exists because
+ * a cash-out is final and irrevocable (see PlayerStatus): a player who
+ * cashes out has no further claim on the cycle, win or lose. If every
+ * bettor on the eventual winning bulb cashes out before the cycle ends,
+ * nobody is left to claim their share of the final distributable pool, and
+ * that share stays with the house on top of the standard 5% edge. This
+ * makes the house's edge a FLOOR, not a ceiling — this breakdown is what
+ * lets that be measured per cycle instead of staying an implicit,
+ * unlogged side effect.
+ */
+export interface HouseTakeBreakdown {
+  /** Total stake on every losing bulb this cycle (every bulb but the
+   *  winner) — the same number the last RoundPoolRecord.eliminatedPool
+   *  entry holds. */
+  eliminatedPool: number;
+  /** houseCutRate * eliminatedPool — the flat edge that applies regardless
+   *  of anyone's cash-out behavior. */
+  standardCut: number;
+  /** eliminatedPool - standardCut: what pari-mutuel pricing makes
+   *  available, in total, to whoever ends the cycle still an active
+   *  claimant on the winning bulb. */
+  distributablePool: number;
+  /** Sum actually paid to still-active winners at cycle end (0 when
+   *  everyone who staked on the winning bulb had already cashed out). */
+  claimedByWinners: number;
+  /** distributablePool - claimedByWinners: the portion with no remaining
+   *  claimant because every eligible bettor already cashed out earlier in
+   *  the cycle. Stays with the house. Zero when nobody on the winning bulb
+   *  cashed out early. */
+  unclaimedPool: number;
+  /** standardCut + unclaimedPool — the cycle's full house take. Equal to
+   *  the standard edge only when nobody cashed out early; strictly larger
+   *  whenever some winning-bulb stake went unclaimed. */
+  totalHouseTake: number;
+}
+
+/**
  * Full audit record for a cycle — everything needed to independently
  * re-validate every payout later, including `eliminationOrder` and the
  * round-by-round pool math.
@@ -138,4 +176,8 @@ export interface CycleAuditRecord {
     reason: 'uncontested';
     contestedBulbCount: number;
   };
+  /** House-take breakdown, computed once the cycle actually resolves with a
+   *  winner (see BulbGameEngine.endCycle). Undefined for a cancelled cycle
+   *  (full refund, no house take at all) and before the cycle completes. */
+  houseTake?: HouseTakeBreakdown;
 }

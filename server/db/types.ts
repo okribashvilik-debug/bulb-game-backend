@@ -33,6 +33,18 @@ export interface CycleRow {
   house_cut_rate: number | null;
   /** One entry per round resolved, in order. Null until the cycle finishes. */
   round_pool_history: RoundPoolRow[] | null;
+  /** houseCutRate * eliminatedPool — the flat edge, regardless of cash-out
+   *  behavior. Null until the cycle finishes; null (not 0) for a cancelled
+   *  cycle. See computeHouseTake() in src/odds/parimutuel.ts. */
+  standard_house_cut: number | null;
+  /** Share of the distributable pool with no remaining claimant because
+   *  everyone on the winning bulb had already cashed out earlier in the
+   *  cycle. Zero (not null) once the cycle finishes with nobody's claim
+   *  going unclaimed; null until the cycle finishes or if cancelled. */
+  unclaimed_pool: number | null;
+  /** standard_house_cut + unclaimed_pool. Null until the cycle finishes or
+   *  if cancelled. */
+  total_house_take: number | null;
   /** Populated only for status='cancelled' (uncontested round, refunded). */
   cancel_reason: string | null;
   started_at: string;

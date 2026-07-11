@@ -38,10 +38,14 @@ export async function markBettingClosed(cycleDbId: string): Promise<void> {
 
 /** Final write for a cycle that actually played out — the full pari-mutuel
  *  audit trail (see CycleAuditRecord), so any payout can be independently
- *  re-derived later from final_stake_by_bulb + round_pool_history alone. */
+ *  re-derived later from final_stake_by_bulb + round_pool_history alone.
+ *  Also writes the house-take breakdown (see computeHouseTake() in
+ *  src/odds/parimutuel.ts) as its own columns — the standard 5% edge and
+ *  the unclaimed-pool amount are logged separately so historical data can
+ *  distinguish how much of a cycle's take came from each. */
 export async function markCycleComplete(
   cycleDbId: string,
-  audit: Pick<CycleAuditRecord, 'finalStakeByBulbId' | 'houseCutRate' | 'roundPoolHistory'>,
+  audit: Pick<CycleAuditRecord, 'finalStakeByBulbId' | 'houseCutRate' | 'roundPoolHistory' | 'houseTake'>,
 ): Promise<void> {
   const { error } = await supabase
     .from('cycles')
@@ -51,6 +55,9 @@ export async function markCycleComplete(
       final_stake_by_bulb: audit.finalStakeByBulbId,
       house_cut_rate: audit.houseCutRate,
       round_pool_history: audit.roundPoolHistory,
+      standard_house_cut: audit.houseTake?.standardCut ?? null,
+      unclaimed_pool: audit.houseTake?.unclaimedPool ?? null,
+      total_house_take: audit.houseTake?.totalHouseTake ?? null,
     })
     .eq('id', cycleDbId);
   if (error) throw error;

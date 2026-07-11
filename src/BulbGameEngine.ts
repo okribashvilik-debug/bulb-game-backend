@@ -42,7 +42,7 @@
 import { isCashOutCheckpoint } from './checkpoints';
 import { defaultClock, type Clock, type TimerHandle } from './clock';
 import { TinyEmitter, type BulbGameEvents } from './events';
-import { computeEliminatedPool, totalStakeByBulbId } from './odds/parimutuel';
+import { computeEliminatedPool, computeHouseTake, totalStakeByBulbId } from './odds/parimutuel';
 import { PariMutuelEngine, type OddsProvider } from './odds/PariMutuelEngine';
 import type { CycleOutcomePlan } from './odds/outcomePlan';
 import type {
@@ -52,6 +52,7 @@ import type {
   CycleSnapshot,
   CycleTimings,
   GameState,
+  HouseTakeBreakdown,
   Player,
   RoundPoolRecord,
 } from './types';
@@ -119,6 +120,9 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
   private roundPoolHistory: RoundPoolRecord[] = [];
   /** Set only when finishCalculating() finds the round uncontested. */
   private cancelledInfo: CycleAuditRecord['cancelled'];
+  /** Set only once endCycle() runs with an actual winner — see
+   *  computeHouseTake(). Undefined for a cancelled cycle (full refund). */
+  private houseTake: HouseTakeBreakdown | undefined;
 
   /** Player ids that have made an explicit decision (cash out or continue)
    *  in the current decision window — lets that window end the instant
@@ -199,6 +203,7 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
       houseCutRate: this.oddsProvider.houseCutRate,
       roundPoolHistory: this.roundPoolHistory.map((r) => ({ ...r })),
       cancelled: this.cancelledInfo,
+      houseTake: this.houseTake ? { ...this.houseTake } : undefined,
     };
   }
 
@@ -237,6 +242,7 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     this.finalStakeByBulbId = undefined;
     this.roundPoolHistory = [];
     this.cancelledInfo = undefined;
+    this.houseTake = undefined;
     this.decidedPlayerIds.clear();
 
     // Integrity-critical: WHO wins and the full elimination order are
@@ -528,11 +534,13 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     // this point every bulb except the winner is 'popped', so eliminated_pool
     // covers the whole losing field and this one lookup IS the win payout.
     const finalCoefficients = this.computeLiveCoefficients();
+    let claimedByWinners = 0;
     for (const player of winners) {
       const coefficient = finalCoefficients.get(player.bulbId)!;
       const value = this.oddsProvider.payoutValue(player.stake, coefficient);
       player.status = 'won';
       player.result = { round: this.currentRound, value };
+      claimedByWinners += value;
     }
 
     // Anyone who popped earlier and is still marked 'popped' effectively
@@ -541,6 +549,17 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
       if (player.status === 'popped') {
         player.status = 'spectator';
       }
+    }
+
+    // A cash-out is final (see PlayerStatus) — anyone who left the winning
+    // bulb early has no further claim, so if `winners` came up empty (or
+    // only covers part of that bulb's total stake), part of the
+    // distributable pool has no claimant left. Undefined winningBulbId
+    // (the uncontested/cancelled path never reaches endCycle) shouldn't
+    // occur here, but this stays defensive rather than assuming.
+    if (winningBulbId !== undefined) {
+      const eliminatedPool = computeEliminatedPool(this.bulbs, this.finalStakeByBulbId!);
+      this.houseTake = computeHouseTake(eliminatedPool, this.oddsProvider.houseCutRate, claimedByWinners);
     }
 
     this.emit('cycleComplete', {
