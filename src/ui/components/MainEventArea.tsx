@@ -1,7 +1,11 @@
+import { useEffect, useRef } from 'react';
 import { useGame } from '../GameContext';
 import { useCountdown } from '../useCountdown';
+import { sfxManager } from '../sfx';
+import { computeStage, type LampState } from '../stage';
 import { BulbTile } from './BulbTile';
 import { Confetti } from './Confetti';
+import { RoomLighting } from './RoomLighting';
 
 const STATE_LABEL: Record<string, string> = {
   idle: 'Starting up…',
@@ -13,15 +17,47 @@ const STATE_LABEL: Record<string, string> = {
   cycle_cancelled: 'Round cancelled — refunding stakes',
 };
 
-function densityClass(bulbCount: number): string {
-  if (bulbCount >= 10) return 'bulb-grid--dense';
-  if (bulbCount >= 7) return 'bulb-grid--cozy';
-  return '';
-}
-
+/**
+ * The main event stage: bulbs hanging from cords in a dark show room whose
+ * lighting reacts to them in real time (design_handoff_main_event_area).
+ *
+ * Everything on stage derives from one model — computeStage(snapshot,
+ * popTransition) — consumed three ways:
+ *   RoomLighting  — the reactive room, rendered behind the bulbs
+ *   BulbTile      — each hanging bulb, rendered on top
+ *   sfx dispatcher — the effect below feeds every per-bulb state
+ *                    TRANSITION to sfxManager.sfxFor(), the same contract
+ *                    the visuals run on, so sound and light stay in step.
+ */
 export function MainEventArea() {
-  const { snapshot, myPlayerId, justPopped, nearMiss, winPulse, cancelledNotice } = useGame();
+  const { snapshot, myPlayerId, popTransition, winPulse, cancelledNotice } = useGame();
   const { remainingMs, progress } = useCountdown(snapshot.phaseDeadlineAt, snapshot.phaseDurationMs);
+
+  const stage = computeStage(snapshot, popTransition);
+
+  const myBulbId =
+    snapshot.players.find(
+      (p) => p.id === myPlayerId && (p.status === 'active' || p.status === 'won'),
+    )?.bulbId ?? null;
+
+  // SFX: fire the dispatcher once per actual state change, per bulb. Keyed
+  // by bulb id (not array index) so a mode switch mid-listen can't hand one
+  // bulb's loop to another; the numeric index sfx.ts keys its loop map by
+  // comes from the bulb's own number.
+  const prevStatesRef = useRef<Map<string, LampState>>(new Map());
+  useEffect(() => {
+    const prevStates = prevStatesRef.current;
+    const nextStates = new Map<string, LampState>();
+    for (const bulb of stage) {
+      nextStates.set(bulb.id, bulb.state);
+      sfxManager.sfxFor(bulb.num - 1, bulb.state, prevStates.get(bulb.id));
+    }
+    // Bulbs that vanished entirely (mode switch) must not leave loops behind.
+    for (const [id] of prevStates) {
+      if (!nextStates.has(id)) sfxManager.stopAllLoops();
+    }
+    prevStatesRef.current = nextStates;
+  });
 
   const roundLabel =
     snapshot.state === 'idle' || snapshot.currentRound === 0
@@ -30,8 +66,17 @@ export function MainEventArea() {
 
   return (
     <div className="main-event stage">
-      <div className="main-event__status">
-        <strong>{STATE_LABEL[snapshot.state]}</strong>
+      <RoomLighting bulbs={stage} />
+
+      <div className="stage-bulbs">
+        {stage.map((bulb) => (
+          <BulbTile key={bulb.id} bulb={bulb} isMine={bulb.id === myBulbId} />
+        ))}
+      </div>
+
+      <div className="stage-caption">
+        <span className="stage-caption__title">Main event</span>
+        <span>{STATE_LABEL[snapshot.state]}</span>
         {roundLabel && <span>· {roundLabel}</span>}
         {snapshot.phaseDeadlineAt !== undefined && <span>· {(remainingMs / 1000).toFixed(1)}s</span>}
       </div>
@@ -46,18 +91,7 @@ export function MainEventArea() {
           refunded in full.
         </div>
       )}
-      <div className={`bulb-grid ${densityClass(snapshot.bulbCount)}`}>
-        {snapshot.bulbs.map((bulb) => (
-          <BulbTile
-            key={bulb.id}
-            bulb={bulb}
-            snapshot={snapshot}
-            myPlayerId={myPlayerId}
-            justPopped={justPopped}
-            nearMiss={nearMiss}
-          />
-        ))}
-      </div>
+
       {winPulse && <Confetti token={winPulse.token} />}
     </div>
   );

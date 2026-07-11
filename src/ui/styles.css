@@ -253,38 +253,45 @@ button:disabled {
 }
 
 /* ==================================================================
-   Main event area (the stage)
+   Main event area — the show stage
+   (design_handoff_main_event_area: bulbs hanging in a dark room whose
+   lighting reacts to them in real time; model in src/ui/stage.ts)
    ================================================================== */
 
 .main-event {
   grid-area: main;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  gap: 20px;
   position: relative;
   overflow: hidden;
+  /* Everything inside is absolutely layered — give the stage real height
+     when the app grid collapses to one column on small screens. */
+  min-height: 520px;
 }
 
-.main-event__status {
-  font-size: 12.5px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+/* Status caption over the stage, top-left (spec: 11px uppercase). */
+.stage-caption {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  z-index: 3;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
-  justify-content: center;
-  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
 }
-.main-event__status strong {
-  color: var(--text);
+.stage-caption__title {
+  color: var(--text-dim);
+  font-weight: 700;
 }
 
 .main-event__timer-bar {
+  position: absolute;
+  top: 36px;
+  left: 16px;
+  z-index: 3;
   width: 220px;
   max-width: 60vw;
   height: 4px;
@@ -299,6 +306,12 @@ button:disabled {
 }
 
 .main-event__cancelled-notice {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  max-width: min(80%, 480px);
   font-size: 12.5px;
   color: var(--gold);
   background: color-mix(in srgb, var(--gold) 14%, transparent);
@@ -308,145 +321,498 @@ button:disabled {
   text-align: center;
 }
 
-.bulb-grid {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 30px;
-  max-width: 880px;
-  --bulb-size: 84px;
-  --bulb-font: 22px;
+/* ---- Room lighting (RoomLighting.tsx) — behind the bulbs ----------- */
+
+.room,
+.stage-bulbs {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
-
-.bulb-grid--cozy {
-  gap: 22px;
-  --bulb-size: 72px;
-  --bulb-font: 19px;
-}
-
-.bulb-grid--dense {
-  gap: 16px;
-  --bulb-size: 60px;
-  --bulb-font: 16px;
-}
-
-/* Near-miss freeze-frame: everything holds still for an instant. */
-.bulb-grid--freeze .bulb-tile__orb {
-  animation-play-state: paused !important;
-}
-
-/* ---- Bulb tile: flat colored disc, limited shading ---------------- */
-
-.bulb-tile {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  width: calc(var(--bulb-size) + 24px);
-}
-
-.bulb-tile__orb {
-  position: relative;
-  width: var(--bulb-size);
-  height: var(--bulb-size);
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #0a0d18;
-  border: 3px solid var(--bulb-color);
-  background: var(--bulb-color);
-  /* Limited shading: one soft inner highlight, nothing more. */
-  box-shadow: inset 0 6px 10px rgba(255, 255, 255, 0.22), inset 0 -8px 14px rgba(0, 0, 0, 0.25);
-}
-
-.bulb-tile__number {
-  font-size: var(--bulb-font);
-  font-weight: 800;
-  position: relative;
+.room {
   z-index: 1;
 }
+.stage-bulbs {
+  z-index: 2;
+}
 
-/* Calm normal states — no continuous glow, no scale jitter. */
-.bulb-tile--alive .bulb-tile__orb {
+/* Static stage shell: curtain wall, floor, gold horizon at 76%. */
+.room__wall {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(90deg, #1c0a12 0px, #2b101a 15px, #1c0a12 30px),
+    linear-gradient(to bottom, #1c0a12, #12060c);
+}
+.room__floor {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 76%;
+  bottom: 0;
+  background: linear-gradient(to bottom, #150a0f 0%, #0a0509 100%);
+}
+.room__horizon {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 76%;
+  height: 1px;
+  background: rgba(245, 196, 81, 0.3);
+}
+
+/* Ambient warm wash — opacity driven by the ambient formula (stage.ts). */
+.room__wash {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse at 50% 24%,
+    rgba(245, 170, 70, 0.36) 0%,
+    rgba(245, 160, 60, 0.12) 45%,
+    transparent 75%
+  );
+  transition: opacity 0.8s ease;
+}
+
+/* Win climax wash — the single brightest, warmest moment. */
+.room__win-wash {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse at 50% 35%,
+    rgba(245, 196, 81, 0.5) 0%,
+    rgba(245, 196, 81, 0.16) 50%,
+    transparent 80%
+  );
+  transition: opacity 0.7s ease;
+}
+
+/* Darkness vignette — strongest when the room is at its quietest. */
+.room__vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at 50% 40%, transparent 30%, rgba(0, 0, 0, 0.6) 100%);
+  transition: opacity 0.9s ease;
+}
+
+/* Per-bulb room layers, anchored at that bulb's column. --warm and
+   --cone-color are the spec's gold-warmed mixes of the bulb's own color;
+   a winner's light goes full gold. */
+.room__bulb {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  --warm: color-mix(in srgb, var(--bulb-color) 55%, var(--gold));
+  --cone-color: color-mix(in srgb, var(--bulb-color) 60%, #fff8e6);
+}
+.room__bulb--win {
+  --warm: var(--gold);
+  --cone-color: color-mix(in srgb, var(--gold) 60%, #fff8e6);
+}
+
+/* Wall glow: this bulb's own light in the room. A pop dims ONLY this
+   glow, over 1s — the room darkens locally because THIS bulb went out. */
+.room__glow {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, var(--warm) 0%, transparent 65%);
+  mix-blend-mode: screen;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.room__bulb--idle .room__glow {
+  opacity: 0.03;
+  transition-duration: 1.2s;
+}
+.room__bulb--charging .room__glow {
+  opacity: 0.16;
+  transition-duration: 2s; /* the room warms up */
+}
+.room__bulb--overcharge .room__glow {
+  opacity: 0.3;
+  transition-duration: 0.2s;
+}
+.room__bulb--popped .room__glow {
+  opacity: 0;
+  transition-duration: 1s;
+}
+.room__bulb--win .room__glow {
+  opacity: 0.55;
+  transition-duration: 0.7s;
+}
+
+/* Overcharge flare: brief localized burst into the room. */
+.room__flare {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, var(--warm) 0%, transparent 60%);
+  mix-blend-mode: screen;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.room__bulb--overcharge .room__flare {
+  opacity: 0.32;
+  animation: overcharge-flicker 0.2s steps(2, jump-none) infinite;
+}
+
+/* Light cone cast down into the room, clipped to a beam. */
+.room__cone {
+  position: absolute;
+  clip-path: polygon(42% 0%, 58% 0%, 100% 100%, 0% 100%);
+  background: linear-gradient(to bottom, var(--cone-color) 0%, transparent 88%);
+  mix-blend-mode: screen;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.room__bulb--charging .room__cone {
+  opacity: 0.42;
+  transition-duration: 1.6s;
+  animation: cone-breathe 1.7s ease-in-out infinite alternate;
+}
+.room__bulb--overcharge .room__cone {
+  opacity: 0.8;
+  transition-duration: 0.15s;
+  animation: overcharge-flicker 0.2s steps(2, jump-none) infinite;
+}
+.room__bulb--popped .room__cone {
+  opacity: 0;
+  transition-duration: 0.25s;
+}
+.room__bulb--win .room__cone {
+  opacity: 0.95;
+  transition-duration: 0.6s;
+  animation: cone-breathe 1.1s ease-in-out infinite alternate;
+}
+
+/* Floor light pool where the cone lands. */
+.room__pool {
+  position: absolute;
+  top: 76%;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  background: radial-gradient(ellipse, var(--cone-color) 0%, transparent 68%);
+  mix-blend-mode: screen;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.room__bulb--charging .room__pool {
+  opacity: 0.4;
+  transition-duration: 1.6s;
+}
+.room__bulb--overcharge .room__pool {
+  opacity: 0.75;
+  transition-duration: 0.15s;
+}
+.room__bulb--popped .room__pool {
+  opacity: 0;
+  transition-duration: 0.25s;
+}
+.room__bulb--win .room__pool {
   opacity: 1;
+  transition-duration: 0.6s;
 }
 
-.bulb-tile--charging .bulb-tile__orb {
-  animation: charging-breathe 1.8s ease-in-out infinite alternate;
-}
-@keyframes charging-breathe {
-  from {
-    filter: brightness(0.92);
-  }
-  to {
-    filter: brightness(1.12);
-  }
+/* ---- Hanging bulb (BulbTile.tsx) — one class family per state ------ */
+
+.bulb {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
 }
 
-.bulb-tile--popped .bulb-tile__orb {
-  border-color: var(--line);
+.bulb__cord {
+  position: absolute;
+  left: -1px;
+  top: 0;
+  width: 2px;
+  background: var(--surface-2);
+}
+
+.bulb__cap {
+  position: absolute;
+  border-radius: 4px 4px 3px 3px;
+  background: repeating-linear-gradient(to bottom, #303a63 0px, #303a63 2px, #1e2444 2px, #1e2444 4px);
+  border: 1px solid var(--line);
+}
+
+/* Shake wrapper — overcharge jitters this, so it composes with the
+   glass's own flicker animation instead of fighting it. */
+.bulb__wrap {
+  position: absolute;
+  border-radius: 50%;
+}
+.bulb--overcharge .bulb__wrap {
+  animation: overcharge-shake 0.11s linear infinite;
+}
+/* "My bulb" marker — kept from the old tile design (the prototype used
+   this outline for its preview-only selection; here it tracks the
+   player's live position instead). */
+.bulb--mine .bulb__wrap {
+  outline: 2px solid rgba(238, 240, 251, 0.85);
+  outline-offset: 4px;
+}
+
+/* Winner rays, behind the glass. */
+.bulb__rays {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: repeating-conic-gradient(
+    from 0deg,
+    rgba(245, 196, 81, 0.3) 0deg 7deg,
+    transparent 7deg 26deg
+  );
+  -webkit-mask-image: radial-gradient(circle, black 18%, transparent 66%);
+  mask-image: radial-gradient(circle, black 18%, transparent 66%);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.bulb--win .bulb__rays {
+  opacity: 1;
+  animation: rays-spin 7s linear infinite;
+}
+
+.bulb__glass {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  transition: box-shadow 0.4s ease, border-color 0.4s ease;
+}
+
+/* Single soft highlight — the ONLY extra shading (flat art rule). */
+.bulb__highlight {
+  position: absolute;
+  left: 22%;
+  top: 12%;
+  width: 26%;
+  height: 18%;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  transform: rotate(-24deg);
+}
+
+.bulb__filament {
+  position: absolute;
+  left: 32%;
+  top: 47%;
+  width: 36%;
+  height: 3px;
+  border-radius: 2px;
+  transition: opacity 0.3s ease;
+}
+
+.bulb__number {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 26%;
+  font-weight: 800;
+  transition: color 0.3s ease;
+}
+
+/* idle: darkest, calmest */
+.bulb--idle .bulb__glass {
+  background: radial-gradient(
+    circle at 50% 38%,
+    color-mix(in srgb, var(--bulb-color) 26%, #131728) 0%,
+    color-mix(in srgb, var(--bulb-color) 12%, #0c0f1c) 60%,
+    #0a0d18 100%
+  );
+  border: 2px solid color-mix(in srgb, var(--bulb-color) 25%, #262c4d);
+  box-shadow: inset 0 -6px 12px rgba(0, 0, 0, 0.5), inset 0 4px 8px rgba(255, 255, 255, 0.05);
+}
+.bulb--idle .bulb__filament {
   background: var(--bulb-color);
-  filter: grayscale(0.75) brightness(0.42);
-  box-shadow: none;
+  opacity: 0.3;
 }
-.bulb-tile--popped .bulb-tile__coeff {
+.bulb--idle .bulb__number {
   color: var(--text-faint);
 }
-.bulb-tile--popped .bulb-tile__number {
-  color: var(--text-dim);
+
+/* charging: builds over 2.4s, then breathes */
+.bulb--charging .bulb__glass {
+  background: radial-gradient(
+    circle at 50% 38%,
+    color-mix(in srgb, #ffffff 55%, var(--bulb-color)) 0%,
+    var(--bulb-color) 52%,
+    color-mix(in srgb, var(--bulb-color) 68%, #0a0d18) 100%
+  );
+  border: 2px solid color-mix(in srgb, #ffffff 30%, var(--bulb-color));
+  box-shadow: 0 0 28px 5px color-mix(in srgb, var(--bulb-color) 55%, transparent),
+    inset 0 -6px 12px rgba(0, 0, 0, 0.25);
+  animation: charge-up 2.4s ease-out, charge-breathe 1.7s ease-in-out 2.4s infinite alternate;
+}
+.bulb--charging .bulb__filament {
+  background: #ffffff;
+  opacity: 1;
+  box-shadow: 0 0 8px 2px rgba(255, 255, 255, 0.9);
+}
+.bulb--charging .bulb__number {
+  color: var(--ink);
 }
 
-.bulb-tile--mine .bulb-tile__orb {
-  outline: 2px solid var(--text);
-  outline-offset: 3px;
+/* overcharge: last burst before the pop */
+.bulb--overcharge .bulb__glass {
+  background: radial-gradient(
+    circle at 50% 40%,
+    #ffffff 0%,
+    color-mix(in srgb, #ffffff 55%, var(--bulb-color)) 40%,
+    var(--bulb-color) 78%,
+    color-mix(in srgb, var(--bulb-color) 75%, #ffffff) 100%
+  );
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 60px 16px color-mix(in srgb, var(--bulb-color) 75%, transparent),
+    0 0 22px 6px rgba(255, 255, 255, 0.75);
+  animation: overcharge-flicker 0.24s steps(2, jump-none) infinite;
+}
+.bulb--overcharge .bulb__filament {
+  background: #ffffff;
+  opacity: 1;
+  box-shadow: 0 0 14px 4px rgba(255, 255, 255, 1);
+}
+.bulb--overcharge .bulb__number {
+  color: var(--ink);
 }
 
-/* ---- Winner: reserved celebratory treatment ------------------------ */
-
-.bulb-tile--winner .bulb-tile__orb {
-  box-shadow: 0 0 0 4px rgba(245, 196, 81, 0.35), 0 0 26px rgba(245, 196, 81, 0.55);
-  animation: winner-glow 1.1s ease-in-out infinite alternate;
+/* popped: dimmed, eliminated. A human loss lands here with NO burst
+   overlays mounted at all (see BulbTile) — the restrained-dim rule from
+   the old bulb-tile--just-popped-human-loss treatment, preserved. */
+.bulb--popped .bulb__glass {
+  background: radial-gradient(circle at 50% 40%, #1c2136 0%, #141829 60%, #0e1120 100%);
+  border: 2px solid var(--line);
+  box-shadow: inset 0 -6px 12px rgba(0, 0, 0, 0.55);
 }
-@keyframes winner-glow {
-  from {
-    box-shadow: 0 0 0 4px rgba(245, 196, 81, 0.25), 0 0 18px rgba(245, 196, 81, 0.4);
-  }
-  to {
-    box-shadow: 0 0 0 4px rgba(245, 196, 81, 0.45), 0 0 34px rgba(245, 196, 81, 0.75);
-  }
+.bulb--popped .bulb__filament {
+  background: var(--line-bright);
+  opacity: 0.4;
 }
-.bulb-tile--human-win .bulb-tile__orb {
-  animation: winner-glow 0.6s ease-in-out infinite alternate;
+.bulb--popped .bulb__number {
+  color: var(--text-faint);
 }
 
-/* ---- Pop moment: dramatic, transient, concentrated right here ----- */
-
-.bulb-tile--just-popped-neutral .bulb-tile__orb {
-  animation: pop-punch 0.55s cubic-bezier(0.2, 0.8, 0.3, 1);
+/* win: the single brightest moment */
+.bulb--win .bulb__glass {
+  background: radial-gradient(
+    circle at 50% 40%,
+    #ffffff 0%,
+    #fff6d8 34%,
+    #f5c451 68%,
+    color-mix(in srgb, #f5c451 70%, var(--bulb-color)) 100%
+  );
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 90px 30px rgba(245, 196, 81, 0.55), 0 0 30px 10px rgba(255, 255, 255, 0.8),
+    0 0 140px 60px color-mix(in srgb, var(--bulb-color) 35%, transparent);
+  animation: win-breathe 1.1s ease-in-out infinite alternate;
 }
-@keyframes pop-punch {
-  0% {
-    transform: scale(1);
-  }
-  30% {
-    transform: scale(1.28);
-    filter: brightness(1.5);
-  }
-  100% {
-    transform: scale(1);
-    filter: grayscale(0.75) brightness(0.42);
-  }
+.bulb--win .bulb__filament {
+  background: #ffffff;
+  opacity: 1;
+  box-shadow: 0 0 16px 5px rgba(255, 255, 255, 1);
+}
+.bulb--win .bulb__number {
+  color: #241a04;
 }
 
-.bulb-tile--just-popped-neutral .bulb-tile__orb::after {
-  content: '';
+/* ---- Pop burst + win sparks (mounted transiently by BulbTile) ------ */
+
+.bulb__flash {
   position: absolute;
-  inset: -6px;
+  inset: -30%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.95) 0%, transparent 62%);
+  animation: pop-flash 0.4s ease-out forwards;
+}
+
+.bulb__shockwave {
+  position: absolute;
+  inset: -8%;
   border-radius: 50%;
   border: 3px solid var(--bulb-color);
-  animation: shockwave 0.6s ease-out forwards;
+  animation: shockwave 0.55s ease-out forwards;
+}
+
+.bulb__shard,
+.bulb__spark {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  animation-name: shard-fly;
+  animation-timing-function: ease-out;
+  animation-fill-mode: forwards;
+}
+.bulb__shard {
+  border-radius: 2px;
+}
+.bulb__spark {
+  border-radius: 50%;
+}
+
+/* ---- Stage keyframes (verbatim from the design prototype) ---------- */
+
+@keyframes charge-up {
+  from {
+    filter: brightness(0.35);
+  }
+  to {
+    filter: brightness(1);
+  }
+}
+@keyframes charge-breathe {
+  from {
+    filter: brightness(0.85);
+  }
+  to {
+    filter: brightness(1.3);
+  }
+}
+@keyframes cone-breathe {
+  from {
+    filter: brightness(0.7);
+  }
+  to {
+    filter: brightness(1.5);
+  }
+}
+@keyframes overcharge-shake {
+  0% {
+    transform: translate(0, 0);
+  }
+  25% {
+    transform: translate(-1.6px, 1.1px);
+  }
+  50% {
+    transform: translate(1.6px, -1.1px);
+  }
+  75% {
+    transform: translate(-1.1px, -1.6px);
+  }
+  100% {
+    transform: translate(1.1px, 1.6px);
+  }
+}
+@keyframes overcharge-flicker {
+  0%,
+  100% {
+    filter: brightness(1.4);
+  }
+  50% {
+    filter: brightness(0.85);
+  }
+}
+@keyframes pop-flash {
+  0% {
+    opacity: 1;
+    transform: scale(0.6);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2);
+  }
 }
 @keyframes shockwave {
   0% {
@@ -454,98 +820,32 @@ button:disabled {
     opacity: 0.9;
   }
   100% {
-    transform: scale(2.1);
+    transform: scale(2.4);
     opacity: 0;
   }
 }
-
-/* Loss: deliberately restrained — a quick dim, nothing celebratory or
-   even visually "cool". Never make a loss feel exciting. */
-.bulb-tile--just-popped-human-loss .bulb-tile__orb {
-  animation: loss-fade 0.5s ease-out;
-}
-@keyframes loss-fade {
+@keyframes shard-fly {
   0% {
-    filter: brightness(0.75);
-  }
-  100% {
-    filter: grayscale(0.75) brightness(0.42);
-  }
-}
-
-/* Particle burst — only for neutral pops (see BulbTile / PopBurst). */
-.bulb-tile__burst {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.bulb-tile__burst span {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 6px;
-  height: 6px;
-  border-radius: 2px;
-  background: var(--particle-color, var(--gold));
-  transform: translate(-50%, -50%);
-  animation: particle-fly 0.6s ease-out forwards;
-}
-@keyframes particle-fly {
-  0% {
-    transform: translate(-50%, -50%) rotate(0deg) translateY(0) scale(1);
+    transform: translate(-50%, -50%) rotate(var(--a)) translateY(0) scale(1);
     opacity: 1;
   }
   100% {
-    transform: translate(-50%, -50%) rotate(var(--angle)) translateY(var(--dist)) scale(0.4);
+    transform: translate(-50%, -50%) rotate(var(--a)) translateY(var(--d)) scale(0.35);
     opacity: 0;
   }
 }
-
-/* ---- Near-miss: reserved, brief flash + label ---------------------- */
-
-.bulb-tile--near-miss .bulb-tile__orb::before {
-  content: '';
-  position: absolute;
-  inset: -4px;
-  border-radius: 50%;
-  border: 2px solid #fff;
-  animation: near-miss-flash 2.2s ease-out forwards;
-}
-@keyframes near-miss-flash {
-  0% {
-    opacity: 0;
-    transform: scale(0.9);
+@keyframes win-breathe {
+  from {
+    filter: brightness(0.95);
   }
-  8% {
-    opacity: 1;
-    transform: scale(1.15);
-  }
-  30% {
-    opacity: 0.7;
-    transform: scale(1);
-  }
-  100% {
-    opacity: 0;
-    transform: scale(1);
+  to {
+    filter: brightness(1.2);
   }
 }
-.bulb-tile--near-miss .bulb-tile__label {
-  color: var(--gold);
-  font-weight: 700;
-}
-
-.bulb-tile__coeff {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--gold);
-}
-
-.bulb-tile__label {
-  font-size: 10.5px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  text-align: center;
+@keyframes rays-spin {
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
 }
 
 /* ---- Confetti (human win only) ------------------------------------- */
@@ -555,6 +855,8 @@ button:disabled {
   inset: 0;
   overflow: hidden;
   pointer-events: none;
+  /* Above the stage's z-indexed room/bulb layers. */
+  z-index: 4;
 }
 .confetti__piece {
   position: absolute;

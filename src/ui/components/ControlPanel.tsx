@@ -1,6 +1,7 @@
 import { useGame } from '../GameContext';
 import { bulbNumber, formatCurrency } from '../format';
 import { getBulbColor } from '../palette';
+import { sfxManager } from '../sfx';
 
 const QUICK_AMOUNTS = [1, 2, 5, 10] as const;
 const STAKE_STEP = 1;
@@ -74,7 +75,10 @@ export function ControlPanel() {
               key={bulb.id}
               className={`chip-btn bulb-chip ${selectedBulbId === bulb.id ? 'selected' : ''}`}
               disabled={!bettingOpen || alreadyBet}
-              onClick={() => setSelectedBulbId(bulb.id)}
+              onClick={() => {
+                sfxManager.playClick(); // the handoff's bulb-selection tick
+                setSelectedBulbId(bulb.id);
+              }}
               style={{ '--bulb-color': color } as React.CSSProperties}
             >
               <span className="bulb-chip__swatch" style={{ backgroundColor: color }} />#{bulbNumber(bulb.id)}

@@ -9,6 +9,7 @@
  * standalone demo built before this backend existed.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { sfxManager } from './sfx';
 import { soundManager } from './sound';
 import type { Bulb, BulbCount, CycleSnapshot, Player } from '../types';
 
@@ -17,10 +18,17 @@ const STARTING_BULB_COUNT: BulbCount = 5;
 const OUTCOME_HISTORY_LIMIT = 30;
 const BETS_FEED_LIMIT = 60;
 const RESOLVED_BETS_LIMIT = 500;
-const JUST_POPPED_DURATION_MS = 750;
+/** A popped bulb shows the overcharge flicker for this long before the
+ *  visual pop lands — see design_handoff_main_event_area (≈1.1s). */
+const OVERCHARGE_DURATION_MS = 1_100;
+/** How long the pop burst overlays (flash/shockwave/shards) stay mounted. */
+const POP_BURST_DURATION_MS = 900;
 const WIN_PULSE_DURATION_MS = 2600;
 const CANCELLED_NOTICE_DURATION_MS = 2500;
-const WIN_SOUND_DELAY_MS = 150; // let the final round's pop sound resolve first
+/** The winner's gold reveal (and the human-win confetti) waits for the
+ *  final pop's overcharge + burst beats to fully land — pop first, THEN
+ *  the win, the same cadence as the design prototype's scripted round. */
+const WIN_REVEAL_DELAY_MS = OVERCHARGE_DURATION_MS + POP_BURST_DURATION_MS;
 const RECONNECT_DELAY_MS = 2000;
 
 export interface OutcomeHistoryEntry {
@@ -69,18 +77,25 @@ function nextTransientToken(): number {
   return transientTokenCounter;
 }
 
-/** A bulb that just popped, for a few hundred ms — drives the dramatic
- *  pop-moment animation. `kind` controls how energetic vs. restrained that
- *  animation and its sound are (never celebratory for a loss). */
-export interface JustPopped {
+/**
+ * The two-beat visual sequence a bulbPopped event drives, one bulb at a
+ * time (pops are always ≥ one full 5s round apart, so sequences never
+ * overlap):
+ *
+ *   phase 'overcharge' (~1.1s) — the bulb flickers/shakes at maximum
+ *     brightness. The server snapshot already says 'popped' by now; the
+ *     stage deliberately holds the visual back for this beat.
+ *   phase 'burst' (~0.9s)      — the pop lands: settled dark glass, with
+ *     flash/shockwave/shard overlays mounted for the duration.
+ *
+ * `kind` controls how energetic vs. restrained the burst and its sound are
+ * — never celebratory for the player's own loss (the loss-restraint rule).
+ */
+export interface PopTransition {
   token: number;
   bulbId: string;
   kind: 'neutral' | 'human-loss';
-}
-
-export interface NearMiss {
-  token: number;
-  bulbId: string;
+  phase: 'overcharge' | 'burst';
 }
 
 export interface WinPulse {
@@ -114,8 +129,7 @@ export interface UseBulbGameResult {
   outcomeHistory: OutcomeHistoryEntry[];
   betsFeed: BetFeedEntry[];
   resolvedBets: ResolvedBet[];
-  justPopped: JustPopped | null;
-  nearMiss: NearMiss | null;
+  popTransition: PopTransition | null;
   winPulse: WinPulse | null;
   cancelledNotice: CancelledNotice | null;
   muted: boolean;
@@ -203,8 +217,7 @@ export function useBulbGame(): UseBulbGameResult {
   const [betsFeed, setBetsFeed] = useState<BetFeedEntry[]>([]);
   const [resolvedBets, setResolvedBets] = useState<ResolvedBet[]>([]);
 
-  const [justPopped, setJustPopped] = useState<JustPopped | null>(null);
-  const [nearMiss] = useState<NearMiss | null>(null);
+  const [popTransition, setPopTransition] = useState<PopTransition | null>(null);
   const [winPulse, setWinPulse] = useState<WinPulse | null>(null);
   const [cancelledNotice, setCancelledNotice] = useState<CancelledNotice | null>(null);
   const [muted, setMutedState] = useState(false);
@@ -214,13 +227,23 @@ export function useBulbGame(): UseBulbGameResult {
 
   const setMuted = useCallback((value: boolean) => {
     soundManager.setMuted(value);
+    sfxManager.setEnabled(!value); // one mute switch governs BOTH audio layers
     setMutedState(value);
+  }, []);
+
+  // Kick off mp3 fetch + decode immediately so the first charging loop is
+  // instant; the AudioContext stays suspended until the gesture below.
+  useEffect(() => {
+    sfxManager.preload();
   }, []);
 
   // Audio needs a user gesture to start in every browser — grab the very
   // first pointer interaction with the page, whatever it is.
   useEffect(() => {
-    const unlock = () => soundManager.unlock();
+    const unlock = () => {
+      soundManager.unlock();
+      sfxManager.unlock();
+    };
     window.addEventListener('pointerdown', unlock, { once: true });
     return () => window.removeEventListener('pointerdown', unlock);
   }, []);
@@ -238,9 +261,10 @@ export function useBulbGame(): UseBulbGameResult {
   useEffect(() => {
     let cancelled = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    let justPoppedTimer: ReturnType<typeof setTimeout> | undefined;
+    let popPhaseTimer: ReturnType<typeof setTimeout> | undefined;
+    let popClearTimer: ReturnType<typeof setTimeout> | undefined;
     let winPulseTimer: ReturnType<typeof setTimeout> | undefined;
-    let winSoundTimer: ReturnType<typeof setTimeout> | undefined;
+    let winPulseClearTimer: ReturnType<typeof setTimeout> | undefined;
     let cancelledNoticeTimer: ReturnType<typeof setTimeout> | undefined;
 
     function handleGameEvent(event: string, payload: unknown): void {
@@ -302,15 +326,20 @@ export function useBulbGame(): UseBulbGameResult {
             });
           }
 
-          clearTimeout(justPoppedTimer);
-          setJustPopped({ token: nextTransientToken(), bulbId: bulb.id, kind: isHumanLoss ? 'human-loss' : 'neutral' });
-          justPoppedTimer = setTimeout(() => setJustPopped(null), JUST_POPPED_DURATION_MS);
-
-          if (isHumanLoss) {
-            soundManager.playPopLoss();
-          } else {
-            soundManager.playPopNeutral();
-          }
+          // Two-beat pop sequence: overcharge flicker first, then the
+          // visual pop lands at the burst moment. No sound here — the sfx
+          // dispatcher (sfx.ts, driven by MainEventArea off the derived
+          // stage states) plays the overcharge loop and the pop one-shot
+          // on the exact same transitions the visuals run on.
+          clearTimeout(popPhaseTimer);
+          clearTimeout(popClearTimer);
+          const token = nextTransientToken();
+          const kind = isHumanLoss ? ('human-loss' as const) : ('neutral' as const);
+          setPopTransition({ token, bulbId: bulb.id, kind, phase: 'overcharge' });
+          popPhaseTimer = setTimeout(() => {
+            setPopTransition({ token, bulbId: bulb.id, kind, phase: 'burst' });
+            popClearTimer = setTimeout(() => setPopTransition(null), POP_BURST_DURATION_MS);
+          }, OVERCHARGE_DURATION_MS);
           // Note: there's no "near miss" cue anymore — elimination order is
           // uniform random under the pari-mutuel model (see
           // odds/outcomePlan.ts), so a coefficient no longer correlates with
@@ -402,14 +431,18 @@ export function useBulbGame(): UseBulbGameResult {
             });
 
             if (humanWon) {
-              // Energetic and celebratory — the one case that earns it. A
-              // short delay lets the final round's (someone else's) pop
-              // sound resolve first instead of colliding with the fanfare.
+              // Energetic and celebratory — the one case that earns it.
+              // Deferred to the win-reveal moment (after the final pop's
+              // overcharge + burst play out) so the confetti fires exactly
+              // when the winning bulb turns gold; the fanfare itself comes
+              // from the sfx dispatcher on that same charging→win
+              // transition.
               clearTimeout(winPulseTimer);
-              setWinPulse({ token: nextTransientToken() });
-              winPulseTimer = setTimeout(() => setWinPulse(null), WIN_PULSE_DURATION_MS);
-              clearTimeout(winSoundTimer);
-              winSoundTimer = setTimeout(() => soundManager.playWin(), WIN_SOUND_DELAY_MS);
+              clearTimeout(winPulseClearTimer);
+              winPulseTimer = setTimeout(() => {
+                setWinPulse({ token: nextTransientToken() });
+                winPulseClearTimer = setTimeout(() => setWinPulse(null), WIN_PULSE_DURATION_MS);
+              }, WIN_REVEAL_DELAY_MS);
             }
           }
           break;
@@ -545,10 +578,12 @@ export function useBulbGame(): UseBulbGameResult {
     return () => {
       cancelled = true;
       clearTimeout(reconnectTimer);
-      clearTimeout(justPoppedTimer);
+      clearTimeout(popPhaseTimer);
+      clearTimeout(popClearTimer);
       clearTimeout(winPulseTimer);
-      clearTimeout(winSoundTimer);
+      clearTimeout(winPulseClearTimer);
       clearTimeout(cancelledNoticeTimer);
+      sfxManager.stopAllLoops();
       wsRef.current?.close();
       wsRef.current = null;
     };
@@ -600,8 +635,7 @@ export function useBulbGame(): UseBulbGameResult {
     outcomeHistory,
     betsFeed,
     resolvedBets,
-    justPopped,
-    nearMiss,
+    popTransition,
     winPulse,
     cancelledNotice,
     muted,
