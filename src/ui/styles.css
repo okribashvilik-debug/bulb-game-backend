@@ -541,16 +541,58 @@ button:disabled {
 .bulb__wrap {
   position: absolute;
   border-radius: 50%;
+  transition: transform 0.15s ease; /* hover lift */
 }
 .bulb--overcharge .bulb__wrap {
   animation: overcharge-shake 0.11s linear infinite;
 }
+/* Direct click-to-select: an invisible, generously-sized (≥44×44px) hit
+   target over the cap + glass, mounted only while the player can still
+   pick (betting open, no bet placed). The stage layers around it are
+   pointer-events: none, so this is the only thing on the stage that
+   takes input. */
+.bulb__hit {
+  position: absolute;
+  pointer-events: auto;
+  background: none;
+  border: none;
+  padding: 0;
+  border-radius: 50%;
+}
+.bulb__hit:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+/* Hover affordance, only while selectable (the hit button only exists
+   then): a subtle lift + brighten. Safe to animate here — during betting
+   every bulb is in the idle state, which has no filter animation of its
+   own to fight with. */
+.bulb:has(.bulb__hit:hover) .bulb__wrap {
+  transform: translateY(-2px);
+}
+.bulb:has(.bulb__hit:hover) .bulb__glass {
+  filter: brightness(1.25);
+}
+
+/* Selected: the player's current pick — same ring language as the
+   ControlPanel chip (border + 1px glow in the bulb's own color), drawn as
+   an outline overlay so it never touches the state animations. */
+.bulb--selected .bulb__wrap {
+  outline: 2px solid var(--bulb-color);
+  outline-offset: 4px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bulb-color) 45%, transparent),
+    0 0 18px color-mix(in srgb, var(--bulb-color) 55%, transparent);
+}
+
 /* "My bulb" marker — kept from the old tile design (the prototype used
    this outline for its preview-only selection; here it tracks the
-   player's live position instead). */
+   player's live position instead). Declared after --selected so a placed
+   bet's white ring wins over the leftover selection ring. */
 .bulb--mine .bulb__wrap {
   outline: 2px solid rgba(238, 240, 251, 0.85);
   outline-offset: 4px;
+  box-shadow: none;
 }
 
 /* Winner rays, behind the glass. */
@@ -579,7 +621,7 @@ button:disabled {
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  transition: box-shadow 0.4s ease, border-color 0.4s ease;
+  transition: box-shadow 0.4s ease, border-color 0.4s ease, filter 0.15s ease;
 }
 
 /* Single soft highlight — the ONLY extra shading (flat art rule). */

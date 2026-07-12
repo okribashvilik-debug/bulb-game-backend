@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useGame } from '../GameContext';
 import { useCountdown } from '../useCountdown';
-import { sfxManager } from '../sfx';
+import { sfxManager } from '../sfx'; // sfxFor dispatcher + the selection tick
 import { computeStage, type LampState } from '../stage';
 import { BulbTile } from './BulbTile';
 import { Confetti } from './Confetti';
@@ -30,7 +30,8 @@ const STATE_LABEL: Record<string, string> = {
  *                    the visuals run on, so sound and light stay in step.
  */
 export function MainEventArea() {
-  const { snapshot, myPlayerId, popTransition, winPulse, cancelledNotice } = useGame();
+  const { snapshot, myPlayerId, popTransition, winPulse, cancelledNotice, selectedBulbId, setSelectedBulbId } =
+    useGame();
   const { remainingMs, progress } = useCountdown(snapshot.phaseDeadlineAt, snapshot.phaseDurationMs);
 
   const stage = computeStage(snapshot, popTransition);
@@ -39,6 +40,17 @@ export function MainEventArea() {
     snapshot.players.find(
       (p) => p.id === myPlayerId && (p.status === 'active' || p.status === 'won'),
     )?.bulbId ?? null;
+
+  // Bulbs are directly clickable to pick one — same selectedBulbId the
+  // ControlPanel chips drive, so the two selection surfaces always agree.
+  // Same eligibility rule as the chips: betting open, no bet placed yet.
+  const alreadyBet = snapshot.players.some((p) => p.id === myPlayerId);
+  const canSelect = snapshot.state === 'betting' && !alreadyBet;
+
+  const selectBulb = (bulbId: string) => {
+    sfxManager.playClick(); // the handoff's selection tick
+    setSelectedBulbId(selectedBulbId === bulbId ? null : bulbId); // click again to deselect
+  };
 
   // SFX: fire the dispatcher once per actual state change, per bulb. Keyed
   // by bulb id (not array index) so a mode switch mid-listen can't hand one
@@ -70,7 +82,14 @@ export function MainEventArea() {
 
       <div className="stage-bulbs">
         {stage.map((bulb) => (
-          <BulbTile key={bulb.id} bulb={bulb} isMine={bulb.id === myBulbId} />
+          <BulbTile
+            key={bulb.id}
+            bulb={bulb}
+            isMine={bulb.id === myBulbId}
+            selected={selectedBulbId === bulb.id}
+            selectable={canSelect && bulb.state !== 'popped'}
+            onSelect={() => selectBulb(bulb.id)}
+          />
         ))}
       </div>
 

@@ -6,6 +6,13 @@ interface BulbTileProps {
   /** The player has an open position on this bulb — keeps the existing
    *  "track my bulb" outline affordance from the old flat-disc tile. */
   isMine: boolean;
+  /** This bulb is the player's current pick (same selectedBulbId the
+   *  ControlPanel chips read/write, so the two always stay in sync). */
+  selected: boolean;
+  /** Betting is open and the player can still (re)pick — only then is the
+   *  bulb rendered with a click/tap/keyboard hit target at all. */
+  selectable: boolean;
+  onSelect: () => void;
 }
 
 /**
@@ -20,8 +27,12 @@ interface BulbTileProps {
  * The room-facing light for this bulb (wall glow, flare, cone, floor pool)
  * deliberately does NOT live here — see RoomLighting.tsx.
  */
-export function BulbTile({ bulb, isMine }: BulbTileProps) {
+export function BulbTile({ bulb, isMine, selected, selectable, onSelect }: BulbTileProps) {
   const L = bulb.layout;
+
+  // Generous hit target for touch: at least 44×44px, covering cap + glass.
+  const hitW = Math.max(L.s, 44);
+  const hitH = Math.max(L.capH + L.s, 44);
 
   // Fresh shards per pop (keyed by the burst token), 12 rects in 65%
   // bulb-color / 35% white. Only ever non-empty for NEUTRAL pops — a human
@@ -42,7 +53,7 @@ export function BulbTile({ bulb, isMine }: BulbTileProps) {
 
   return (
     <div
-      className={`bulb bulb--${bulb.state}${isMine ? ' bulb--mine' : ''}`}
+      className={`bulb bulb--${bulb.state}${isMine ? ' bulb--mine' : ''}${selected ? ' bulb--selected' : ''}`}
       style={{ left: `${L.leftPct}%`, '--bulb-color': bulb.color } as React.CSSProperties}
     >
       <div className="bulb__cord" style={{ height: L.cordH }} />
@@ -112,6 +123,25 @@ export function BulbTile({ bulb, isMine }: BulbTileProps) {
             />
           ))}
       </div>
+
+      {/* Click/tap/keyboard hit target — only mounted while the player can
+          actually (re)pick, so outside the betting window there's no
+          cursor affordance, no focus stop, and clicks fall through. */}
+      {selectable && (
+        <button
+          type="button"
+          className="bulb__hit"
+          style={{
+            left: -Math.round(hitW / 2),
+            top: Math.min(L.cordH, L.cordH + L.capH + L.s - hitH),
+            width: hitW,
+            height: hitH,
+          }}
+          aria-pressed={selected}
+          aria-label={`Select bulb ${bulb.num}`}
+          onClick={onSelect}
+        />
+      )}
     </div>
   );
 }
