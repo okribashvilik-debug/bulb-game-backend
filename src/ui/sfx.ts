@@ -16,6 +16,17 @@
  *                 a popped bulb going idle at cycle reset stays silent)
  *   click       — short UI tick for bulb selection
  *
+ * Background music: one ambient track (public/sfx/background.mp3) loops
+ * underneath everything for as long as the page is open — independent of
+ * round/bulb state or mode. It starts on the same first-gesture unlock as
+ * the rest of the audio, runs through its OWN dedicated gain node (so
+ * ambience and SFX are volume-controlled independently), and loops via a
+ * scheduled ~1.5s equal-crossfade between iterations so there's never an
+ * audible seam or click at the loop point. The master enable toggle mutes
+ * it together with the SFX; setMusicEnabled() additionally allows muting
+ * just the music while keeping SFX (no UI wired to it yet — it exists so
+ * adding that toggle later is one line).
+ *
  * This module is deliberately separate from sound.ts (the older cue set —
  * cash-out, decision-window open/close — which stays in use for
  * non-stage UI moments). Both obey the same mute toggle: useBulbGame
@@ -32,6 +43,20 @@ const SAMPLE_URLS: Record<SampleKey, string> = {
 
 const DEFAULT_VOLUME = 0.6;
 
+const MUSIC_URL = '/sfx/background.mp3';
+/** Ambience, not a featured sound — deliberately far below the SFX volume
+ *  (0.6) so it never competes with charging/overcharge/pop/win cues.
+ *  Tune by ear here; nothing else needs to change. */
+const MUSIC_VOLUME = 0.18;
+/** Overlap between the end of one loop iteration and the start of the
+ *  next — long enough to hide any hard edit at the track boundaries. */
+const MUSIC_CROSSFADE_S = 1.5;
+/** How far ahead of the crossfade point the next iteration gets scheduled
+ *  (in real time, via setTimeout). Generous so a briefly-throttled timer
+ *  in a background tab still lands before the audio-clock deadline —
+ *  and tabs that are audibly playing are exempt from heavy throttling. */
+const MUSIC_SCHEDULE_LOOKAHEAD_S = 5;
+
 export type SfxState = 'idle' | 'charging' | 'overcharge' | 'popped' | 'win';
 
 class SfxManager {
@@ -44,6 +69,19 @@ class SfxManager {
   private loopNodes = new Map<number, [AudioBufferSourceNode, GainNode]>();
   private enabled = true;
   private volume = DEFAULT_VOLUME;
+
+  // Background music state — see startMusic()/scheduleMusicIteration().
+  private musicBuffer: AudioBuffer | null = null;
+  /** Dedicated gain node for the ambience layer, separate from every
+   *  per-sample SFX gain, so the two are independently controllable. */
+  private musicGain: GainNode | null = null;
+  private musicSources: AudioBufferSourceNode[] = [];
+  private musicTimer: ReturnType<typeof setTimeout> | undefined;
+  private musicPlaying = false;
+  /** True once the first user gesture has unlocked audio — from then on
+   *  the music (re)starts itself whenever it's allowed to play. */
+  private musicUnlocked = false;
+  private musicEnabled = true;
 
   /** Create the (suspended) context and start fetching + decoding samples
    *  so first playback is instant. Safe to call more than once. */
@@ -62,6 +100,17 @@ class SfxManager {
           // Missing/undecodable sample — the game plays fine silently.
         });
     }
+    fetch(MUSIC_URL)
+      .then((r) => r.arrayBuffer())
+      .then((ab) => ctx.decodeAudioData(ab))
+      .then((buf) => {
+        this.musicBuffer = buf;
+        // Decode may finish after the unlock gesture — start now if so.
+        this.maybeStartMusic();
+      })
+      .catch(() => {
+        // No background track — everything else still works.
+      });
   }
 
   /** Browsers keep an AudioContext suspended until a user gesture — call
@@ -70,11 +119,25 @@ class SfxManager {
     if (this.ctx && this.ctx.state === 'suspended') {
       void this.ctx.resume();
     }
+    this.musicUnlocked = true;
+    this.maybeStartMusic();
   }
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
-    if (!enabled) this.stopAllLoops();
+    if (!enabled) {
+      this.stopAllLoops();
+      this.stopMusic(); // the master toggle always silences BOTH layers
+    } else {
+      this.maybeStartMusic();
+    }
+  }
+
+  /** Independent music-only toggle (master setEnabled still wins). */
+  setMusicEnabled(enabled: boolean): void {
+    this.musicEnabled = enabled;
+    if (!enabled) this.stopMusic();
+    else this.maybeStartMusic();
   }
 
   setVolume(volume: number): void {
@@ -112,6 +175,95 @@ class SfxManager {
   /** Stop every running loop (component unmount / mute). */
   stopAllLoops(): void {
     for (const index of [...this.loopNodes.keys()]) this.stopLoop(index);
+  }
+
+  /** Stop the background track (mute / unmount) with a short fade so it
+   *  never cuts off with a click. Restartable via maybeStartMusic(). */
+  stopMusic(): void {
+    if (!this.musicPlaying) return;
+    this.musicPlaying = false;
+    clearTimeout(this.musicTimer);
+    this.musicTimer = undefined;
+    const ctx = this.ctx;
+    if (ctx && this.musicGain) {
+      const t = ctx.currentTime;
+      this.musicGain.gain.cancelScheduledValues(t);
+      this.musicGain.gain.setValueAtTime(this.musicGain.gain.value, t);
+      this.musicGain.gain.linearRampToValueAtTime(0, t + 0.2);
+    }
+    for (const src of this.musicSources) {
+      try {
+        src.stop(ctx ? ctx.currentTime + 0.25 : undefined);
+      } catch {
+        // already stopped — fine
+      }
+    }
+    this.musicSources = [];
+    this.musicGain = null;
+  }
+
+  // -----------------------------------------------------------------
+  // Background music internals
+  // -----------------------------------------------------------------
+
+  /** Starts the ambience loop iff everything lines up: buffer decoded,
+   *  audio unlocked by a gesture, both toggles on, not already playing.
+   *  Called from every place one of those conditions flips true. */
+  private maybeStartMusic(): void {
+    if (this.musicPlaying) return;
+    if (!this.enabled || !this.musicEnabled || !this.musicUnlocked || !this.musicBuffer) return;
+    const ctx = this.getRunningContext();
+
+    this.musicPlaying = true;
+    this.musicGain = ctx.createGain();
+    this.musicGain.gain.value = MUSIC_VOLUME;
+    this.musicGain.connect(ctx.destination);
+    this.scheduleMusicIteration(ctx.currentTime + 0.05);
+  }
+
+  /**
+   * Plays one pass of the track starting at `startAt` (audio-clock time)
+   * and pre-schedules the next pass to begin MUSIC_CROSSFADE_S before this
+   * one ends, with matching fade-out/fade-in ramps — a seamless crossfade
+   * loop that doesn't rely on the file's own edit points being clean.
+   * Scheduling for iteration N+1 happens well ahead of the deadline (see
+   * MUSIC_SCHEDULE_LOOKAHEAD_S) on the sample-accurate audio clock, so a
+   * lazy setTimeout can't cause an audible gap.
+   */
+  private scheduleMusicIteration(startAt: number): void {
+    const ctx = this.ctx;
+    const buffer = this.musicBuffer;
+    const musicGain = this.musicGain;
+    if (!ctx || !buffer || !musicGain || !this.musicPlaying) return;
+
+    const duration = buffer.duration;
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    // Per-iteration envelope: fade in over the crossfade window, hold,
+    // fade out over the last crossfade window. The master musicGain on
+    // top stays at MUSIC_VOLUME (and is what mute/stop ramps down).
+    const envelope = ctx.createGain();
+    envelope.gain.setValueAtTime(0, startAt);
+    envelope.gain.linearRampToValueAtTime(1, startAt + MUSIC_CROSSFADE_S);
+    envelope.gain.setValueAtTime(1, startAt + duration - MUSIC_CROSSFADE_S);
+    envelope.gain.linearRampToValueAtTime(0, startAt + duration);
+    src.connect(envelope).connect(musicGain);
+    src.start(startAt);
+    src.stop(startAt + duration + 0.1);
+
+    this.musicSources.push(src);
+    src.onended = () => {
+      this.musicSources = this.musicSources.filter((s) => s !== src);
+    };
+
+    // Next iteration begins where this one's fade-out begins.
+    const nextStartAt = startAt + duration - MUSIC_CROSSFADE_S;
+    const delayMs = Math.max(
+      0,
+      (nextStartAt - ctx.currentTime - MUSIC_SCHEDULE_LOOKAHEAD_S) * 1000,
+    );
+    clearTimeout(this.musicTimer);
+    this.musicTimer = setTimeout(() => this.scheduleMusicIteration(nextStartAt), delayMs);
   }
 
   /** Short UI tick for selecting a bulb (triangle 1800→700Hz over 40ms). */

@@ -584,6 +584,7 @@ export function useBulbGame(): UseBulbGameResult {
       clearTimeout(winPulseClearTimer);
       clearTimeout(cancelledNoticeTimer);
       sfxManager.stopAllLoops();
+      sfxManager.stopMusic();
       wsRef.current?.close();
       wsRef.current = null;
     };
