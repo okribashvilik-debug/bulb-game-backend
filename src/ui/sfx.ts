@@ -7,25 +7,35 @@
  * on screen. MainEventArea drives it from the derived StageBulb states.
  *
  * Sample-based cues (mp3s from the handoff, served from public/sfx/):
- *   charging    — looped while a bulb is in 'charging'; ~80ms fade on exit
- *   overcharge  — looped during the pre-pop flicker; same stop behavior
+ *   charging    — looped while any bulb is charging
+ *   overcharge  — looped during a pre-pop flicker
  *   popped      — one-shot pop
+ * The charging/overcharge loops share ONE exclusive stage channel (see
+ * setStagePhase): at any moment at most one of charging / overcharge /
+ * pop is audible. Every phase change is a strict sequential handoff — the
+ * old loop is faded out over ~80ms first, and the next sound starts only
+ * after that fade has finished, rather than sounds running out on their
+ * own natural duration and bleeding into each other. A pop additionally
+ * holds the channel quiet until the one-shot has finished, so charging
+ * for the next round can't ride over the pop's tail.
+ *
  * Synthesized cues (Web Audio oscillators, verbatim from the prototype):
  *   win         — ascending triangle arpeggio C5/E5/G5/C6 + 2093Hz shimmer
  *   idle        — power-down sweep (only when entered from a LIVE state;
  *                 a popped bulb going idle at cycle reset stays silent)
  *   click       — short UI tick for bulb selection
  *
- * Background music: one ambient track (public/sfx/background.mp3) loops
- * underneath everything for as long as the page is open — independent of
- * round/bulb state or mode. It starts on the same first-gesture unlock as
- * the rest of the audio, runs through its OWN dedicated gain node (so
- * ambience and SFX are volume-controlled independently), and loops via a
- * scheduled ~1.5s equal-crossfade between iterations so there's never an
- * audible seam or click at the loop point. The master enable toggle mutes
- * it together with the SFX; setMusicEnabled() additionally allows muting
- * just the music while keeping SFX (no UI wired to it yet — it exists so
- * adding that toggle later is one line).
+ * Background music: one ambient track (public/sfx/background.mp3) that is
+ * tied to SESSION boundaries — startMusicSession() restarts it from its
+ * very first note the moment a new cycle's betting opens, stopMusic()
+ * silences it when the cycle completes or cancels. The buffer is fetched
+ * and fully decoded up front (preload(), on mount) so the session-start
+ * playback is instant, never late or clipped. It runs through its OWN
+ * dedicated gain node (independent of every SFX gain) and, should a
+ * session outlast the track, loops via a scheduled ~1.5s crossfade so
+ * there's never an audible seam. The master enable toggle mutes it
+ * together with the SFX; setMusicEnabled() additionally allows muting
+ * just the music while keeping SFX (no UI wired to it yet).
  *
  * This module is deliberately separate from sound.ts (the older cue set —
  * cash-out, decision-window open/close — which stays in use for
@@ -41,7 +51,15 @@ const SAMPLE_URLS: Record<SampleKey, string> = {
   pop: '/sfx/pop.mp3',
 };
 
-const DEFAULT_VOLUME = 0.6;
+/** Master SFX level — deliberately soft so the cues sit under the
+ *  background ambience instead of competing with it. Tune by ear here. */
+const DEFAULT_VOLUME = 0.38;
+
+/** Fade-out applied to a loop on every phase handoff (and the delay before
+ *  the next phase's sound starts) — long enough to avoid a hard click,
+ *  short enough to read as instantaneous. */
+const HANDOFF_FADE_S = 0.08;
+const HANDOFF_GAP_MS = 90;
 
 const MUSIC_URL = '/sfx/background.mp3';
 /** Ambience, not a featured sound — deliberately far below the SFX volume
@@ -57,18 +75,30 @@ const MUSIC_CROSSFADE_S = 1.5;
  *  and tabs that are audibly playing are exempt from heavy throttling. */
 const MUSIC_SCHEDULE_LOOKAHEAD_S = 5;
 
-export type SfxState = 'idle' | 'charging' | 'overcharge' | 'popped' | 'win';
+/** The one-at-a-time stage channel's phase — an AGGREGATE of the whole
+ *  stage, not per-bulb: 'overcharge' if any bulb is overcharging,
+ *  'charging' if any bulb is charging, else 'quiet'. */
+export type StagePhase = 'quiet' | 'charging' | 'overcharge';
 
 class SfxManager {
   private ctx: AudioContext | null = null;
   private buffers: Partial<Record<SampleKey, AudioBuffer>> = {};
   private preloadStarted = false;
-  /** bulb index -> the looping charge/overcharge nodes currently playing
-   *  for that bulb (at most one loop per bulb, exactly like the
-   *  prototype's _chargeNodes map). */
-  private loopNodes = new Map<number, [AudioBufferSourceNode, GainNode]>();
   private enabled = true;
   private volume = DEFAULT_VOLUME;
+
+  // The exclusive stage channel — at most ONE charging/overcharge loop
+  // exists at a time, globally (see setStagePhase).
+  private channel: [AudioBufferSourceNode, GainNode] | null = null;
+  private channelPhase: StagePhase = 'quiet';
+  private desiredPhase: StagePhase = 'quiet';
+  private phaseTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Audio-clock time before which NO loop may start: pushed forward by
+   *  every handoff fade (so the next loop can't begin until the previous
+   *  one has fully faded — even if applyStagePhase is re-entered by a
+   *  re-render inside the gap) and by playPop() (so nothing loops over
+   *  the pop one-shot's tail). */
+  private channelBlockedUntil = 0;
 
   // Background music state — see startMusic()/scheduleMusicIteration().
   private musicBuffer: AudioBuffer | null = null;
@@ -82,6 +112,9 @@ class SfxManager {
    *  the music (re)starts itself whenever it's allowed to play. */
   private musicUnlocked = false;
   private musicEnabled = true;
+  /** True between startMusicSession() (a cycle's betting opened) and
+   *  stopMusic() (the cycle completed/cancelled). */
+  private musicSessionActive = false;
 
   /** Create the (suspended) context and start fetching + decoding samples
    *  so first playback is instant. Safe to call more than once. */
@@ -126,9 +159,12 @@ class SfxManager {
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
     if (!enabled) {
+      const phase = this.desiredPhase; // stopAllLoops clears it — remember for re-enable
       this.stopAllLoops();
-      this.stopMusic(); // the master toggle always silences BOTH layers
+      this.desiredPhase = phase;
+      this.stopMusicPlayback(); // the master toggle always silences BOTH layers
     } else {
+      this.applyStagePhase();
       this.maybeStartMusic();
     }
   }
@@ -136,50 +172,87 @@ class SfxManager {
   /** Independent music-only toggle (master setEnabled still wins). */
   setMusicEnabled(enabled: boolean): void {
     this.musicEnabled = enabled;
-    if (!enabled) this.stopMusic();
+    if (!enabled) this.stopMusicPlayback();
     else this.maybeStartMusic();
+  }
+
+  /** A new game cycle just opened for betting: (re)start the background
+   *  track from its very first note. The buffer was decoded at preload
+   *  time, so this is sample-accurate and instant — nothing is fetched or
+   *  decoded on this hot path. Until the first user gesture unlocks audio,
+   *  this only marks the session active; unlock() then starts playback. */
+  startMusicSession(): void {
+    this.musicSessionActive = true;
+    this.stopMusicPlayback(); // restart from the top, never resume mid-track
+    this.maybeStartMusic();
+  }
+
+  /** The cycle ended (complete or cancelled): stop the track until the
+   *  next session starts. */
+  stopMusic(): void {
+    this.musicSessionActive = false;
+    this.stopMusicPlayback();
   }
 
   setVolume(volume: number): void {
     this.volume = Math.max(0, Math.min(1, volume));
   }
 
-  /** The one dispatcher: state string -> sound, same contract as the
-   *  stage's visual()/roomLight() families. No-op when nothing changed. */
-  sfxFor(bulbIndex: number, state: SfxState, prev: SfxState | undefined): void {
-    if (state === prev) return;
-    switch (state) {
-      case 'idle':
-        this.stopLoop(bulbIndex);
-        // Power-down only from a live state — a popped bulb resetting to
-        // idle for the next cycle shouldn't make N simultaneous thuds.
-        if (prev && prev !== 'popped') this.playIdle();
-        break;
-      case 'charging':
-        this.startLoop(bulbIndex, 'charging', 0.9);
-        break;
-      case 'overcharge':
-        this.startLoop(bulbIndex, 'overcharge', 1);
-        break;
-      case 'popped':
-        this.stopLoop(bulbIndex);
-        this.playPop();
-        break;
-      case 'win':
-        this.stopLoop(bulbIndex);
-        this.playWin();
-        break;
+  /**
+   * Drive the exclusive stage channel. Callers pass the aggregate phase of
+   * the whole stage on every change; this applies it as a strict
+   * sequential handoff — fade the current loop out (~80ms), wait for that
+   * fade, only then start the next loop — so charging can never bleed
+   * into overcharge, nor overcharge into whatever follows. Re-asserting
+   * the current phase is a no-op (a second bulb starting to charge does
+   * NOT stack a second loop).
+   */
+  setStagePhase(phase: StagePhase): void {
+    this.desiredPhase = phase;
+    this.applyStagePhase();
+  }
+
+  /** One-shot pop. Fades the stage channel out first (overcharge must be
+   *  fully stopped before the pop lands), then keeps the channel quiet
+   *  for the pop's duration so the next round's charging can't ride over
+   *  its tail. */
+  playPop(): void {
+    if (!this.enabled) return;
+    const ctx = this.getRunningContext();
+    const hadChannel = this.channel !== null;
+    this.stopChannel(); // blocks the channel past its own fade
+
+    const startDelayS = hadChannel ? HANDOFF_GAP_MS / 1000 : 0;
+    const popDuration = this.buffers.pop?.duration ?? 1.2;
+    // Extend the block to cover the pop's whole tail: the next round's
+    // charging loop may only start once the pop has finished.
+    this.channelBlockedUntil = Math.max(
+      this.channelBlockedUntil,
+      ctx.currentTime + startDelayS + popDuration,
+    );
+
+    if (hadChannel) {
+      setTimeout(() => this.playSample('pop', { gain: 1 }), HANDOFF_GAP_MS);
+    } else {
+      this.playSample('pop', { gain: 1 });
     }
+    // Re-evaluate the loop channel once the block expires (applyStagePhase
+    // schedules itself past channelBlockedUntil).
+    this.applyStagePhase();
   }
 
-  /** Stop every running loop (component unmount / mute). */
+  /** Stop the stage channel and drop the desired phase (unmount / mute). */
   stopAllLoops(): void {
-    for (const index of [...this.loopNodes.keys()]) this.stopLoop(index);
+    this.desiredPhase = 'quiet';
+    clearTimeout(this.phaseTimer);
+    this.phaseTimer = undefined;
+    this.stopChannel();
   }
 
-  /** Stop the background track (mute / unmount) with a short fade so it
-   *  never cuts off with a click. Restartable via maybeStartMusic(). */
-  stopMusic(): void {
+  /** Silence the background track with a short fade so it never cuts off
+   *  with a click. Does NOT clear the session flag — mute/unmute inside a
+   *  running session restarts the track (see maybeStartMusic()). */
+  private stopMusicPlayback(): void {
     if (!this.musicPlaying) return;
     this.musicPlaying = false;
     clearTimeout(this.musicTimer);
@@ -206,19 +279,21 @@ class SfxManager {
   // Background music internals
   // -----------------------------------------------------------------
 
-  /** Starts the ambience loop iff everything lines up: buffer decoded,
-   *  audio unlocked by a gesture, both toggles on, not already playing.
-   *  Called from every place one of those conditions flips true. */
+  /** Starts the track from the top iff everything lines up: a session is
+   *  active, buffer decoded, audio unlocked by a gesture, both toggles
+   *  on, not already playing. Called from every place one of those
+   *  conditions flips true, so whichever happens LAST starts playback. */
   private maybeStartMusic(): void {
     if (this.musicPlaying) return;
-    if (!this.enabled || !this.musicEnabled || !this.musicUnlocked || !this.musicBuffer) return;
+    if (!this.enabled || !this.musicEnabled || !this.musicSessionActive) return;
+    if (!this.musicUnlocked || !this.musicBuffer) return;
     const ctx = this.getRunningContext();
 
     this.musicPlaying = true;
     this.musicGain = ctx.createGain();
     this.musicGain.gain.value = MUSIC_VOLUME;
     this.musicGain.connect(ctx.destination);
-    this.scheduleMusicIteration(ctx.currentTime + 0.05);
+    this.scheduleMusicIteration(ctx.currentTime + 0.02, true);
   }
 
   /**
@@ -230,7 +305,7 @@ class SfxManager {
    * MUSIC_SCHEDULE_LOOKAHEAD_S) on the sample-accurate audio clock, so a
    * lazy setTimeout can't cause an audible gap.
    */
-  private scheduleMusicIteration(startAt: number): void {
+  private scheduleMusicIteration(startAt: number, isFirst = false): void {
     const ctx = this.ctx;
     const buffer = this.musicBuffer;
     const musicGain = this.musicGain;
@@ -239,12 +314,18 @@ class SfxManager {
     const duration = buffer.duration;
     const src = ctx.createBufferSource();
     src.buffer = buffer;
-    // Per-iteration envelope: fade in over the crossfade window, hold,
-    // fade out over the last crossfade window. The master musicGain on
-    // top stays at MUSIC_VOLUME (and is what mute/stop ramps down).
+    // Per-iteration envelope: fade in over the crossfade window (except
+    // the very first pass — the session start must land on the track's
+    // first note at full level, not eased in), hold, fade out over the
+    // last crossfade window. The master musicGain on top stays at
+    // MUSIC_VOLUME (and is what mute/stop ramps down).
     const envelope = ctx.createGain();
-    envelope.gain.setValueAtTime(0, startAt);
-    envelope.gain.linearRampToValueAtTime(1, startAt + MUSIC_CROSSFADE_S);
+    if (isFirst) {
+      envelope.gain.setValueAtTime(1, startAt);
+    } else {
+      envelope.gain.setValueAtTime(0, startAt);
+      envelope.gain.linearRampToValueAtTime(1, startAt + MUSIC_CROSSFADE_S);
+    }
     envelope.gain.setValueAtTime(1, startAt + duration - MUSIC_CROSSFADE_S);
     envelope.gain.linearRampToValueAtTime(0, startAt + duration);
     src.connect(envelope).connect(musicGain);
@@ -315,37 +396,77 @@ class SfxManager {
     return [src, gain];
   }
 
-  private startLoop(bulbIndex: number, key: Exclude<SampleKey, 'pop'>, gain: number): void {
-    this.stopLoop(bulbIndex);
-    const nodes = this.playSample(key, { loop: true, gain });
-    if (nodes) this.loopNodes.set(bulbIndex, nodes);
+  /**
+   * The stage-channel state machine's single step. Runs whenever the
+   * desired phase, the enable state, or the pop hold could have changed;
+   * reschedules itself when it has to wait (for a handoff fade or for a
+   * pop one-shot to finish) so the desired phase is always eventually
+   * applied — and applied ALONE.
+   */
+  private applyStagePhase(): void {
+    clearTimeout(this.phaseTimer);
+    this.phaseTimer = undefined;
+    if (!this.enabled) return;
+    if (this.desiredPhase === this.channelPhase) return;
+
+    // Strict sequential handoff: fade the current loop first (this pushes
+    // channelBlockedUntil past the fade), then fall through to the block
+    // check below, which schedules the actual start.
+    if (this.channel) {
+      this.stopChannel();
+    }
+
+    // The channel is blocked — a handoff fade is still ringing out, or a
+    // pop one-shot owns the stage. Wait it out on the AUDIO clock: this is
+    // what makes re-entry harmless — a re-render calling in again just
+    // re-derives the same deadline instead of skipping the gap.
+    const ctx = this.ctx;
+    if (ctx && ctx.currentTime < this.channelBlockedUntil) {
+      const waitMs = (this.channelBlockedUntil - ctx.currentTime) * 1000 + 20;
+      this.phaseTimer = setTimeout(() => this.applyStagePhase(), waitMs);
+      return;
+    }
+
+    if (this.desiredPhase === 'quiet') {
+      this.channelPhase = 'quiet';
+      return;
+    }
+    const nodes = this.playSample(this.desiredPhase, {
+      loop: true,
+      gain: this.desiredPhase === 'charging' ? 0.9 : 1,
+    });
+    if (nodes) this.channel = nodes;
+    // Buffer may not be decoded yet on a very early round — treat the
+    // phase as applied either way rather than busy-retrying; the next
+    // phase change re-evaluates.
+    this.channelPhase = this.desiredPhase;
   }
 
-  /** ~80ms gain fade, then stop — no hard cut-off click. */
-  private stopLoop(bulbIndex: number): void {
-    const nodes = this.loopNodes.get(bulbIndex);
+  /** ~80ms gain fade, then stop — no hard cut-off click. Blocks the
+   *  channel until the fade has fully finished, so whatever starts next
+   *  can never overlap the tail. */
+  private stopChannel(): void {
+    const nodes = this.channel;
+    this.channel = null;
+    this.channelPhase = 'quiet';
     if (!nodes) return;
-    this.loopNodes.delete(bulbIndex);
     const ctx = this.ctx;
     if (!ctx) return;
     const [src, gain] = nodes;
     const t = ctx.currentTime;
+    this.channelBlockedUntil = Math.max(this.channelBlockedUntil, t + HANDOFF_GAP_MS / 1000);
     gain.gain.cancelScheduledValues(t);
     gain.gain.setValueAtTime(gain.gain.value, t);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + HANDOFF_FADE_S);
     try {
-      src.stop(t + 0.1);
+      src.stop(t + HANDOFF_FADE_S + 0.02);
     } catch {
       // already stopped — fine
     }
   }
 
-  private playPop(): void {
-    this.playSample('pop', { gain: 1 });
-  }
-
   /** Celebratory ascending gold arpeggio + shimmer. */
-  private playWin(): void {
+  playWin(): void {
     if (!this.enabled) return;
     const ctx = this.getRunningContext();
     const t = ctx.currentTime;
@@ -376,7 +497,7 @@ class SfxManager {
 
   /** Soft low "power down" sweep when a bulb returns to idle from a live
    *  state (sine 320→90Hz over 0.25s). */
-  private playIdle(): void {
+  playIdle(): void {
     if (!this.enabled) return;
     const ctx = this.getRunningContext();
     const t = ctx.currentTime;

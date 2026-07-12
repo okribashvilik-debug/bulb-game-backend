@@ -52,22 +52,41 @@ export function MainEventArea() {
     setSelectedBulbId(selectedBulbId === bulbId ? null : bulbId); // click again to deselect
   };
 
-  // SFX: fire the dispatcher once per actual state change, per bulb. Keyed
-  // by bulb id (not array index) so a mode switch mid-listen can't hand one
-  // bulb's loop to another; the numeric index sfx.ts keys its loop map by
-  // comes from the bulb's own number.
+  // SFX: one-shots fire on per-bulb transitions; the charging/overcharge
+  // loops are driven by the AGGREGATE stage phase through one exclusive
+  // channel in sfx.ts, so only one of charging / overcharge / pop is ever
+  // audible at a time — no per-bulb loop stacking, no bleed across the
+  // charging → overcharge → pop handoffs. playPop() runs BEFORE
+  // setStagePhase() so its quiet-hold is in place when the phase applies.
   const prevStatesRef = useRef<Map<string, LampState>>(new Map());
   useEffect(() => {
     const prevStates = prevStatesRef.current;
     const nextStates = new Map<string, LampState>();
+    let popped = false;
+    let won = false;
+    let poweredDown = false;
     for (const bulb of stage) {
       nextStates.set(bulb.id, bulb.state);
-      sfxManager.sfxFor(bulb.num - 1, bulb.state, prevStates.get(bulb.id));
+      const prev = prevStates.get(bulb.id);
+      if (prev === bulb.state) continue;
+      if (bulb.state === 'popped') popped = true;
+      else if (bulb.state === 'win') won = true;
+      // Power-down only from a live state — popped bulbs resetting to idle
+      // for the next cycle stay silent (and fire at most once per batch).
+      else if (bulb.state === 'idle' && prev !== undefined && prev !== 'popped' && prev !== 'idle')
+        poweredDown = true;
     }
-    // Bulbs that vanished entirely (mode switch) must not leave loops behind.
-    for (const [id] of prevStates) {
-      if (!nextStates.has(id)) sfxManager.stopAllLoops();
-    }
+    if (popped) sfxManager.playPop();
+    if (won) sfxManager.playWin();
+    if (poweredDown) sfxManager.playIdle();
+
+    const phase = stage.some((b) => b.state === 'overcharge')
+      ? 'overcharge'
+      : stage.some((b) => b.state === 'charging')
+        ? 'charging'
+        : 'quiet';
+    sfxManager.setStagePhase(phase);
+
     prevStatesRef.current = nextStates;
   });
 

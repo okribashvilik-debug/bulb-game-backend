@@ -231,21 +231,46 @@ export function useBulbGame(): UseBulbGameResult {
     setMutedState(value);
   }, []);
 
-  // Kick off mp3 fetch + decode immediately so the first charging loop is
-  // instant; the AudioContext stays suspended until the gesture below.
+  // Kick off mp3 fetch + decode immediately so the first charging loop and
+  // the background track's session start are instant (no decode on the hot
+  // path); the AudioContext stays suspended until the gesture below.
   useEffect(() => {
     sfxManager.preload();
   }, []);
 
-  // Audio needs a user gesture to start in every browser — grab the very
-  // first pointer interaction with the page, whatever it is.
+  // Background music follows SESSION boundaries: restart from the top the
+  // moment a new cycle opens for betting, stop when the cycle completes or
+  // cancels. Driven by actual game-state transitions off the socket — not
+  // a one-time mount trigger — and deduped by cycleId, since many snapshot
+  // broadcasts arrive during a single betting window.
+  const musicCycleRef = useRef<string>('');
+  useEffect(() => {
+    if (snapshot.state === 'betting' && snapshot.cycleId && snapshot.cycleId !== musicCycleRef.current) {
+      musicCycleRef.current = snapshot.cycleId;
+      sfxManager.startMusicSession();
+    } else if (snapshot.state === 'cycle_complete' || snapshot.state === 'cycle_cancelled') {
+      sfxManager.stopMusic();
+    }
+  }, [snapshot.state, snapshot.cycleId]);
+
+  // Audio needs a user gesture to start in every browser. Deliberately NOT
+  // a { once: true } listener: if the first pointerdown doesn't carry user
+  // activation (e.g. a synthetic event), resume() silently fails and a
+  // one-shot listener would leave the context suspended forever — the old
+  // "no sound until you toggle mute/unmute" bug. Both unlock() calls are
+  // idempotent no-ops once their contexts are running, so re-firing on
+  // every interaction costs nothing and guarantees recovery.
   useEffect(() => {
     const unlock = () => {
       soundManager.unlock();
       sfxManager.unlock();
     };
-    window.addEventListener('pointerdown', unlock, { once: true });
-    return () => window.removeEventListener('pointerdown', unlock);
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
   }, []);
 
   const setBulbCount = useCallback((count: BulbCount) => {
