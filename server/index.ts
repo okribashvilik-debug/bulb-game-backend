@@ -51,7 +51,14 @@ app.get('/api/leaderboard', async (req, res) => {
 // one Render service hosts both the API/WebSocket backend and the game
 // itself at a single URL. Guarded by existsSync so `npm run server:dev`
 // still works locally even when the client hasn't been built into dist/.
-const clientDistPath = path.join(__dirname, '..', '..', 'dist');
+//
+// Resolved from the process working directory (the repo root — where both
+// `npm run server:dev` and Render's `npm start` launch from) rather than
+// `__dirname`: the root package is `"type": "module"`, so the tsx dev path
+// runs this file as ESM where `__dirname` is undefined, while the compiled
+// prod build is CommonJS where `import.meta.url` isn't available. `cwd` is
+// the one anchor valid under both runtimes.
+const clientDistPath = path.join(process.cwd(), 'dist');
 if (fs.existsSync(clientDistPath)) {
   app.use(express.static(clientDistPath));
   app.use((req, res, next) => {

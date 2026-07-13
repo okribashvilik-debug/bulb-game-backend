@@ -16,19 +16,25 @@ interface BulbTileProps {
 }
 
 /**
- * One hanging bulb: cord, screw cap, glass (highlight + filament + number),
- * winner rays, and the transient pop-burst / win-spark overlays — the
- * per-bulb anatomy from design_handoff_main_event_area, exactly in the
- * spec's z-order. All state styling lives in the `bulb--<state>` CSS
+ * One hanging bulb: cord (with an electricity-flow overlay), screw cap,
+ * glass (highlight + filament + number), winner rays, and the transient
+ * pop-burst / win-spark overlays — the per-bulb anatomy from
+ * design_handoff_main_event_area, exactly in the spec's z-order. All state
+ * styling lives in the `bulb--<state>` / `cord-energy--<state>` CSS
  * families in styles.css; this component only places geometry (from
- * StageBulbLayout) and mounts/unmounts the particle overlays so their CSS
- * animations retrigger fresh on every pop.
+ * StageBulbLayout) and mounts/unmounts the particle/spark/arc overlays so
+ * their CSS animations retrigger fresh (particles on every pop; the
+ * spark's travel and the overcharge arc mount with their state, per the
+ * electricity-flow patch).
  *
  * The room-facing light for this bulb (wall glow, flare, cone, floor pool)
  * deliberately does NOT live here — see RoomLighting.tsx.
  */
 export function BulbTile({ bulb, isMine, selected, selectable, onSelect }: BulbTileProps) {
   const L = bulb.layout;
+  // "Powered" states get a travelling spark on the cord; only overcharge
+  // additionally gets the jittering arc bolt.
+  const powered = bulb.state === 'charging' || bulb.state === 'overcharge' || bulb.state === 'win';
 
   // Generous hit target for touch: at least 44×44px, covering cap + glass.
   const hitW = Math.max(L.s, 44);
@@ -57,6 +63,25 @@ export function BulbTile({ bulb, isMine, selected, selectable, onSelect }: BulbT
       style={{ left: `${L.leftPct}%`, '--bulb-color': bulb.color } as React.CSSProperties}
     >
       <div className="bulb__cord" style={{ height: L.cordH }} />
+
+      {/* Electricity flowing ceiling -> bulb: an overlay on the cord, never
+          touching cord geometry. Dashes are always present (opacity/flow
+          speed vary per state via the cord-energy--<state> class); the
+          travelling spark and the overcharge arc mount only while
+          applicable so they don't animate invisibly in the background. */}
+      <div className={`cord-energy cord-energy--${bulb.state}`} style={{ height: L.cordH }}>
+        <div className="cord-energy__dashes" />
+        {powered && <div className="cord-energy__spark" />}
+        {bulb.state === 'overcharge' && (
+          <div className="cord-energy__arc">
+            <svg viewBox="0 0 12 100" preserveAspectRatio="none">
+              <polyline className="cord-energy__arc-halo" points="6,0 3,14 9,26 4,40 8,54 3,68 9,82 6,100" />
+              <polyline className="cord-energy__arc-core" points="6,0 3,14 9,26 4,40 8,54 3,68 9,82 6,100" />
+            </svg>
+          </div>
+        )}
+      </div>
+
       <div
         className="bulb__cap"
         style={{ left: -Math.round(L.capW / 2), top: L.cordH, width: L.capW, height: L.capH }}

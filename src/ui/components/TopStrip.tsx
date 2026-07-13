@@ -33,16 +33,39 @@ function OutcomeChip({ entry }: { entry: OutcomeHistoryEntry }) {
 export function TopStrip() {
   const { outcomeHistory, bulbCount, setBulbCount, snapshot, muted, setMuted } = useGame();
   const [expanded, setExpanded] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const visible = outcomeHistory.slice(0, expanded ? EXPANDED_COUNT : COLLAPSED_COUNT);
   const canExpand = outcomeHistory.length > COLLAPSED_COUNT;
   const pendingChange = bulbCount !== snapshot.bulbCount;
+  // Same source + ordering convention as the inline chips (newest first).
+  const previousRounds = outcomeHistory.slice(0, EXPANDED_COUNT);
 
   return (
     <div className="top-strip chrome">
       <div className="top-strip__brand">
         <span aria-hidden="true">💡</span>
         <span>Bulb Game</span>
+      </div>
+      <div className="top-strip__history">
+        <button
+          className="chip-btn top-strip__prev-toggle"
+          onClick={() => setHistoryOpen((v) => !v)}
+          aria-expanded={historyOpen}
+        >
+          Previous Rounds {historyOpen ? '▲' : '▼'}
+        </button>
+        {historyOpen && (
+          <div className="top-strip__history-panel" role="dialog" aria-label="Previous rounds">
+            <div className="top-strip__history-panel-title">Previous rounds</div>
+            <div className="top-strip__history-grid">
+              {previousRounds.length === 0 && <span className="empty-state">No rounds yet</span>}
+              {previousRounds.map((entry) => (
+                <OutcomeChip key={entry.cycleId} entry={entry} />
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <div className={`top-strip__chips ${expanded ? 'expanded' : ''}`}>
         {visible.length === 0 && (
@@ -56,7 +79,7 @@ export function TopStrip() {
       </div>
       {canExpand && (
         <button className="chip-btn top-strip__toggle" onClick={() => setExpanded((v) => !v)}>
-          {expanded ? 'Show less' : `Last ${EXPANDED_COUNT}`}
+          {expanded ? 'Show less' : 'Previous rounds'}
         </button>
       )}
       <button

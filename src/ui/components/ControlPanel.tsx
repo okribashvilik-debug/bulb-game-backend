@@ -100,9 +100,6 @@ export function ControlPanel() {
       {snapshot.state === 'calculating' && !alreadyBet && (
         <div className="control-panel__note">Betting is closed — calculating odds…</div>
       )}
-      {!bettingOpen && snapshot.state !== 'calculating' && !alreadyBet && (
-        <div className="control-panel__note">Betting opens again once this cycle ends.</div>
-      )}
     </div>
   );
 }

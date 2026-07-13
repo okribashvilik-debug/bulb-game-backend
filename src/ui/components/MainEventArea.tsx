@@ -113,16 +113,21 @@ export function MainEventArea() {
       </div>
 
       <div className="stage-caption">
-        <span className="stage-caption__title">Main event</span>
-        <span>{STATE_LABEL[snapshot.state]}</span>
-        {roundLabel && <span>· {roundLabel}</span>}
-        {snapshot.phaseDeadlineAt !== undefined && <span>· {(remainingMs / 1000).toFixed(1)}s</span>}
+        <span className="stage-caption__status">{STATE_LABEL[snapshot.state]}</span>
+        {(roundLabel || snapshot.phaseDeadlineAt !== undefined) && (
+          <span className="stage-caption__bar-row">
+            {snapshot.phaseDeadlineAt !== undefined && (
+              <span className="main-event__timer-bar">
+                <span style={{ width: `${(1 - progress) * 100}%` }} />
+              </span>
+            )}
+            {roundLabel && <span>{roundLabel}</span>}
+          </span>
+        )}
+        {snapshot.phaseDeadlineAt !== undefined && (
+          <span className="stage-caption__timer">{(remainingMs / 1000).toFixed(1)}s</span>
+        )}
       </div>
-      {snapshot.phaseDeadlineAt !== undefined && (
-        <div className="main-event__timer-bar">
-          <div style={{ width: `${(1 - progress) * 100}%` }} />
-        </div>
-      )}
       {cancelledNotice && (
         <div className="main-event__cancelled-notice">
           Round cancelled — nobody else bet against you, so every stake ({cancelledNotice.refundedCount}) was
