@@ -43,7 +43,31 @@ export function MainEventArea() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  const stage = computeStage(snapshot, popTransition, compact);
+  // Measured stage height, fed to computeStage so cord lengths compress on
+  // short stages and the lowest bulb never collides with the status
+  // caption (see the cordScale note in stage.ts).
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [stageHeight, setStageHeight] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const measure = () => setStageHeight(Math.round(el.getBoundingClientRect().height));
+    // Belt and braces: a synchronous mount measurement plus a window-resize
+    // listener alongside the ResizeObserver — some embedded/throttled
+    // rendering environments delay or drop observer callbacks, and the
+    // initial measurement is what prevents a caption/bulb collision on the
+    // very first paint.
+    measure();
+    window.addEventListener('resize', measure);
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
+    observer?.observe(el);
+    return () => {
+      window.removeEventListener('resize', measure);
+      observer?.disconnect();
+    };
+  }, []);
+
+  const stage = computeStage(snapshot, popTransition, compact, stageHeight);
 
   const myBulbId =
     snapshot.players.find(
@@ -109,7 +133,7 @@ export function MainEventArea() {
       : `Round ${snapshot.currentRound}/${snapshot.totalRounds}`;
 
   return (
-    <div className="main-event stage">
+    <div className="main-event stage" ref={stageRef}>
       <RoomLighting bulbs={stage} />
 
       <div className="stage-bulbs">

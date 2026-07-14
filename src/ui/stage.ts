@@ -101,6 +101,11 @@ export function computeStage(
    *  the glass diameter to ~64% so a full 5/7/10-bulb row fits a phone
    *  stage. Every other layout metric derives from `s`, so it cascades. */
   compact = false,
+  /** Measured height of the stage element, when the caller knows it. Used
+   *  to compress the cords on short stages so the lowest-hanging (middle)
+   *  bulb — plus its coefficient label — always clears the status caption
+   *  band at the stage bottom, instead of hanging into it. */
+  stageHeight?: number,
 ): StageBulb[] {
   const n = snapshot.bulbs.length;
   if (n === 0) return [];
@@ -111,9 +116,28 @@ export function computeStage(
   const spacing = Math.min(13, 82 / Math.max(1, n - 1));
   const mid = (n - 1) / 2;
 
+  // Cord compression for short stages. The deepest glass bottom is
+  // cordH_max + capH - 3 + s (middle bulb, norm = 0 → cordH 138); below it
+  // sit the coefficient label (~23px) and the status caption block with
+  // its bottom offset (~110px). If the measured stage can't fit all of
+  // that, scale every cord down proportionally — the parabolic arc shape
+  // is preserved, just flattened — so the caption always renders in clean
+  // space under the lowest bulb. Floor 0.3 keeps the hang readable; below
+  // that the stage itself is unusably short anyway.
+  // = caption block (~100px incl. its 16px bottom offset) + the bulb's
+  // coefficient label below the glass (~23px) + breathing room.
+  const CAPTION_CLEARANCE = 152;
+  const MAX_CORD = 64 + 74;
+  let cordScale = 1;
+  if (stageHeight !== undefined && stageHeight > 0) {
+    const capH = Math.round(s * 0.26);
+    const allowedCord = stageHeight - CAPTION_CLEARANCE - s - (capH - 3);
+    cordScale = Math.max(0.3, Math.min(1, allowedCord / MAX_CORD));
+  }
+
   return snapshot.bulbs.map((bulb, i) => {
     const norm = mid === 0 ? 0 : (i - mid) / mid;
-    const cordH = Math.round(64 + 74 * (1 - norm * norm));
+    const cordH = Math.round((64 + 74 * (1 - norm * norm)) * cordScale);
     const capW = Math.round(s * 0.44);
     const capH = Math.round(s * 0.26);
     const glassTop = cordH + capH - 3;
