@@ -1433,9 +1433,20 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+/* Mobile-row wrappers (see ControlPanel.tsx): dissolved on desktop so
+   their children stay direct flex items of .control-panel — the desktop
+   layout is byte-identical to the pre-wrapper markup. The ≤900px block
+   turns them into real rows. */
+.cp-row {
+  display: contents;
+}
+
 /* Left utility column: mute → how-to-play → policy, vertically centered
    in the panel, one identical gap between all three. Pushed to the far
-   left edge (margin-right auto claims the empty space beside balance). */
+   left edge (margin-right auto claims the empty space beside balance).
+   order -1 restores the far-left slot on desktop now that the markup
+   places this after the bet button (for the mobile side row) — ties with
+   .bulb-picker's -1, and DOM order keeps the chips row first. */
 .panel-utility {
   display: flex;
   flex-direction: column;
@@ -1443,6 +1454,7 @@ button:disabled {
   gap: 8px;
   align-self: center;
   margin-right: auto;
+  order: -1;
 }
 /* Square utility button: the old top-strip mute chip (~30px) scaled up
    30% → 39px, icon/font scaled proportionally (12px → 15.6px). */
@@ -1621,10 +1633,16 @@ button:disabled {
   box-shadow: none;
 }
 
+/* Always mounted (see ControlPanel.tsx): a fixed-height slot whether or
+   not there's a note, so the bar's total height is identical across every
+   game state — no layout shift when betting closes or a bet lands. */
 .control-panel__note {
   font-size: 11.5px;
+  line-height: 1.4;
+  min-height: 16px;
   color: var(--text-dim);
   flex-basis: 100%;
+  text-align: center;
   overflow-wrap: anywhere;
 }
 
@@ -1840,6 +1858,37 @@ button:disabled {
     border-right: none;
     padding-right: 0;
   }
+  /* Outcome history on phones: ONE fixed-height row that scrolls sideways
+     instead of wrapping and growing the bar as rounds accumulate — same
+     no-layout-shift principle as the control-panel note slot. Scrollbar
+     hidden; touch momentum scroll keeps older chips reachable (and the
+     Previous Rounds panel still has the full list). */
+  .top-strip__chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    min-height: 30px;
+    max-height: 30px;
+    align-items: center;
+    flex-basis: 100%;
+  }
+  .top-strip__chips::-webkit-scrollbar {
+    display: none;
+  }
+  /* Slightly tighter chips so more outcomes fit per screenful. */
+  .outcome-chip {
+    padding: 4px 8px;
+    gap: 5px;
+    font-size: 11px;
+  }
+  .outcome-chip__bulb {
+    width: 16px;
+    height: 16px;
+    font-size: 9px;
+  }
   /* The dropdown anchors to a mid-bar button; on a narrow screen pin it
      to the viewport edges instead so it can't hang off-screen. */
   .top-strip__history-panel {
@@ -1874,16 +1923,44 @@ button:disabled {
     width: auto;
     max-width: none;
   }
-  /* Stacked mode: the side columns turn horizontal so the betting panel
-     stays compact — utility row (mute/help/policy) left, bulb-count row
-     (still 10 → 7 → 5, now left-to-right) right, sharing one line. */
+  /* Stacked mode: the .cp-row wrappers (display: contents on desktop —
+     see the base rule) become real full-width flex rows, giving explicit,
+     deterministic lines at any width under 900px:
+       chips                      (full width)
+       balance ←————→ stake       (.cp-row--money, edges)
+       utility · bulb-count       (.cp-row--side, grouped left, one gap)
+       bet                        (full width)
+       note                       (full width)                          */
+  .cp-row {
+    display: flex;
+    align-items: center;
+    flex-basis: 100%;
+    min-width: 0;
+  }
+  .cp-row--money {
+    justify-content: space-between;
+  }
+  .cp-row--side {
+    justify-content: flex-start;
+    gap: 18px;
+  }
+  /* DOM places the bet button before the side row (desktop order); the
+     stacked layout wants chips → money → side → bet → note. */
+  .bet-button {
+    order: 1;
+  }
+  .control-panel__note {
+    order: 2;
+  }
   .panel-utility {
     flex-direction: row;
-    align-self: auto;
+    align-self: center;
+    margin-right: 0;
   }
   .bulb-count-picker {
     flex-direction: row;
-    align-self: auto;
+    align-self: center;
+    margin-left: 0;
   }
   /* Info modals: use the full phone width minus overlay padding. */
   .info-modal {
@@ -1918,5 +1995,44 @@ button:disabled {
   .info-modal__close {
     width: 40px;
     height: 40px;
+  }
+}
+
+/* Compact control-panel metrics for the stacked layout. Placed AFTER the
+   coarse-pointer block on purpose (source order wins at equal specificity):
+   on a narrow touch screen these tighter sizes must beat the generic
+   touch-target bumps, or the balance/stake and utility/bulb-count rows
+   overflow at ~336px. */
+@media (max-width: 900px) {
+  .balance-display {
+    padding: 0 4px;
+  }
+  .balance-display__value {
+    font-size: 22px;
+  }
+  .stake-control__input {
+    width: 60px;
+  }
+  .cp-row--money .stake-control {
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+  .stake-control__quick .chip-btn {
+    padding: 4px 8px;
+  }
+  .panel-utility__btn {
+    width: 38px;
+    height: 38px;
+  }
+  .panel-utility {
+    gap: 6px;
+  }
+  .bulb-count-picker {
+    gap: 6px;
+  }
+  .bulb-count-picker .chip-btn {
+    min-width: 38px;
+    padding: 8px 0;
+    text-align: center;
   }
 }

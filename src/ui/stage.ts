@@ -94,11 +94,20 @@ function deriveLampState(
   return 'idle';
 }
 
-export function computeStage(snapshot: CycleSnapshot, popTransition: PopTransition | null): StageBulb[] {
+export function computeStage(
+  snapshot: CycleSnapshot,
+  popTransition: PopTransition | null,
+  /** Narrow-viewport mode (≤900px, same breakpoint as styles.css): shrinks
+   *  the glass diameter to ~64% so a full 5/7/10-bulb row fits a phone
+   *  stage. Every other layout metric derives from `s`, so it cascades. */
+  compact = false,
+): StageBulb[] {
   const n = snapshot.bulbs.length;
   if (n === 0) return [];
 
-  const s = n >= 10 ? 56 : n >= 7 ? 66 : 78;
+  // Compact keeps the same 5:7:10 size ordering; 36px floor keeps the
+  // number (numSize = s * 0.3 ≈ 11px) legible at the 10-bulb case.
+  const s = compact ? (n >= 10 ? 36 : n >= 7 ? 42 : 50) : n >= 10 ? 56 : n >= 7 ? 66 : 78;
   const spacing = Math.min(13, 82 / Math.max(1, n - 1));
   const mid = (n - 1) / 2;
 

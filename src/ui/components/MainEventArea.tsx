@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useGame } from '../GameContext';
 import { useCountdown } from '../useCountdown';
 import { sfxManager } from '../sfx'; // sfxFor dispatcher + the selection tick
@@ -34,7 +34,16 @@ export function MainEventArea() {
     useGame();
   const { remainingMs, progress } = useCountdown(snapshot.phaseDeadlineAt, snapshot.phaseDurationMs);
 
-  const stage = computeStage(snapshot, popTransition);
+  // Narrow-viewport flag for computeStage (pure, no window access of its
+  // own) — same 900px breakpoint as the stacked-layout CSS.
+  const [compact, setCompact] = useState(() => window.innerWidth <= 900);
+  useEffect(() => {
+    const onResize = () => setCompact(window.innerWidth <= 900);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const stage = computeStage(snapshot, popTransition, compact);
 
   const myBulbId =
     snapshot.players.find(

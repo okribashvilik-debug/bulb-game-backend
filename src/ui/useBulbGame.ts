@@ -185,6 +185,17 @@ function resolveWsUrl(): string {
   return `${wsProtocol}//${host}/ws`;
 }
 
+/** Same host-resolution rule as resolveWsUrl, for plain HTTP reads (the
+ *  Vite dev server only hosts the client, so REST calls also target the
+ *  backend's own port there; in prod one service serves both). */
+function resolveApiBase(): string {
+  const { protocol, hostname, port } = window.location;
+  if ((hostname === 'localhost' || hostname === '127.0.0.1') && port !== '8787') {
+    return `${protocol}//${hostname}:8787`;
+  }
+  return '';
+}
+
 const EMPTY_SNAPSHOT: CycleSnapshot = {
   cycleId: '',
   state: 'idle',
@@ -224,6 +235,40 @@ export function useBulbGame(): UseBulbGameResult {
 
   const wsRef = useRef<WebSocket | null>(null);
   const seededLiveBetsRef = useRef(false);
+
+  // Seed the Previous Rounds strip from the cycles audit trail on mount
+  // and on every mode switch, so history survives a refresh and always
+  // shows the CURRENT mode's own past cycles. Purely additive to the live
+  // path: websocket cycleComplete events keep prepending as before, and
+  // the merge dedupes by cycleId in case a live entry lands before the
+  // fetch resolves. Entries from other modes are dropped on switch (the
+  // fetched list replaces them for the newly selected mode).
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${resolveApiBase()}/api/history?mode=${bulbCount}&limit=${OUTCOME_HISTORY_LIMIT}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((body: { entries: Array<Omit<OutcomeHistoryEntry, 'coefficient'> & { coefficient: number | null }> }) => {
+        if (cancelled || !Array.isArray(body.entries)) return;
+        const fetched: OutcomeHistoryEntry[] = body.entries.map((e) => ({
+          ...e,
+          // null on the wire (JSON has no undefined) → undefined in state,
+          // preserving the "never coerce to 0" blank-coefficient rule.
+          coefficient: e.coefficient ?? undefined,
+        }));
+        setOutcomeHistory((prev) => {
+          const live = prev.filter((e) => e.bulbCount === bulbCount);
+          const liveIds = new Set(live.map((e) => e.cycleId));
+          return [...live, ...fetched.filter((e) => !liveIds.has(e.cycleId))].slice(0, OUTCOME_HISTORY_LIMIT);
+        });
+      })
+      .catch((err) => {
+        // Non-fatal: the strip just starts empty (exactly the old behavior).
+        console.warn('[history] could not seed outcome history:', err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bulbCount]);
 
   const setMuted = useCallback((value: boolean) => {
     soundManager.setMuted(value);

@@ -78,6 +78,73 @@ export async function markCycleCancelled(cycleDbId: string, contestedBulbCount: 
   if (error) throw error;
 }
 
+/** One entry of the outcome-history read path (GET /api/history) — shaped
+ *  exactly like the client's OutcomeHistoryEntry so the fetched seed and
+ *  the live websocket-driven entries are interchangeable. */
+export interface CycleHistoryEntry {
+  cycleId: string;
+  bulbId: string;
+  bulbNumber: number;
+  /** The coefficient the winner was actually PAID at (payout/stake from a
+   *  resolved 'won' live_bets row — bots included), i.e. the same frozen
+   *  settlement coefficient the live UI showed at cycle_complete. Null when
+   *  nobody was left active on the winning bulb (all cashed out, or it was
+   *  never staked) — the live UI showed "—" for those, so history must too;
+   *  never coerce to 0. */
+  coefficient: number | null;
+  bulbCount: BulbCount;
+  timestamp: number;
+}
+
+/** Recent completed cycles for a mode, newest first — the boot-time seed
+ *  for the client's Previous Rounds strip. Coefficients come from the
+ *  winners' actual resolved payouts (payout = stake × frozen settlement
+ *  coefficient — see BulbGameEngine.endCycle), NOT re-derived from pool
+ *  math, so history always matches what was displayed live. */
+export async function fetchCycleHistory(mode: BulbCount, limit = 30): Promise<CycleHistoryEntry[]> {
+  const { data, error } = await supabase
+    .from('cycles')
+    .select('id, engine_cycle_id, winning_bulb_id, ended_at')
+    .eq('mode', mode)
+    .eq('status', 'complete')
+    .order('ended_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  const cycles = (data ?? []) as Array<{
+    id: string;
+    engine_cycle_id: string;
+    winning_bulb_id: string | null;
+    ended_at: string;
+  }>;
+  if (cycles.length === 0) return [];
+
+  const { data: wonRows, error: wonError } = await supabase
+    .from('live_bets')
+    .select('cycle_id, stake, payout')
+    .in('cycle_id', cycles.map((c) => c.id))
+    .eq('event_type', 'won');
+  if (wonError) throw wonError;
+
+  // All winners on a bulb settle at the same coefficient, so any one won
+  // row per cycle is enough.
+  const coefficientByCycleId = new Map<string, number>();
+  for (const row of (wonRows ?? []) as Array<{ cycle_id: string; stake: number; payout: number | null }>) {
+    if (row.payout === null || !(row.stake > 0) || coefficientByCycleId.has(row.cycle_id)) continue;
+    coefficientByCycleId.set(row.cycle_id, Number(row.payout) / Number(row.stake));
+  }
+
+  return cycles
+    .filter((c) => c.winning_bulb_id !== null)
+    .map((c) => ({
+      cycleId: c.engine_cycle_id,
+      bulbId: c.winning_bulb_id!,
+      bulbNumber: Number(c.winning_bulb_id!.split('_')[1]),
+      coefficient: coefficientByCycleId.get(c.id) ?? null,
+      bulbCount: mode,
+      timestamp: Date.parse(c.ended_at),
+    }));
+}
+
 export async function fetchRecentCycles(mode: BulbCount, limit = 30): Promise<CycleRow[]> {
   const { data, error } = await supabase
     .from('cycles')

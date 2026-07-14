@@ -16,7 +16,9 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 
 import { env } from './env';
+import { fetchCycleHistory } from './db/cyclesRepo';
 import { fetchLeaderboard, type LeaderboardWindow } from './db/leaderboardRepo';
+import type { BulbCount } from '../src/index';
 import { SessionManager } from './game/sessionManager';
 import { handleConnection } from './ws/connection';
 import { startHeartbeat } from './ws/heartbeat';
@@ -73,6 +75,27 @@ if (fs.existsSync(clientDistPath)) {
     res.status(200).json({ name: 'bulb-game-server', status: 'running', note: 'client build not found — run `npm run build`' });
   });
 }
+
+// Outcome history for the Previous Rounds strip: recent COMPLETED cycles
+// for a mode, straight from the cycles/live_bets audit trail, so the strip
+// survives a page refresh instead of resetting to empty. Read-only,
+// additive — live websocket events still prepend in real time on top of
+// this boot-time seed (see useBulbGame.ts).
+app.get('/api/history', async (req, res) => {
+  const mode = Number(req.query.mode ?? 5);
+  if (![5, 7, 10].includes(mode)) {
+    res.status(400).json({ error: 'mode must be one of: 5, 7, 10' });
+    return;
+  }
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 30) || 30, 1), 100);
+  try {
+    const entries = await fetchCycleHistory(mode as BulbCount, limit);
+    res.status(200).json({ mode, entries });
+  } catch (err) {
+    console.error('[GET /api/history]', err);
+    res.status(502).json({ error: 'Could not load history.' });
+  }
+});
 
 const httpServer = http.createServer(app);
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });

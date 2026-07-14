@@ -45,33 +45,10 @@ export function ControlPanel() {
 
   return (
     <div className="control-panel chrome">
-      <div className="panel-utility">
-        <button
-          className="chip-btn panel-utility__btn"
-          onClick={() => setMuted(!muted)}
-          aria-label={muted ? 'Unmute sound' : 'Mute sound'}
-          title={muted ? 'Unmute sound' : 'Mute sound'}
-        >
-          {muted ? '🔇' : '🔊'}
-        </button>
-        <button
-          className="chip-btn panel-utility__btn"
-          onClick={() => setHowToPlayOpen(true)}
-          aria-label="How to play"
-          title="How to play"
-        >
-          ?
-        </button>
-        <button
-          className="chip-btn panel-utility__btn"
-          onClick={() => setPolicyOpen(true)}
-          aria-label="Game policy and rules"
-          title="Game policy and rules"
-        >
-          ⓘ
-        </button>
-      </div>
-
+      {/* .cp-row wrappers are display:contents on desktop (children stay
+          direct flex items of the panel, layout unchanged) and become real
+          rows in the ≤900px stacked layout — see styles.css. */}
+      <div className="cp-row cp-row--money">
       <div className="balance-display">
         <span className="balance-display__label">Balance</span>
         <span className="balance-display__value">{formatCurrency(balance)}</span>
@@ -119,6 +96,7 @@ export function ControlPanel() {
           </button>
         </div>
       </div>
+      </div>
 
       <div className="bulb-picker">
         {snapshot.bulbs.map((bulb) => {
@@ -154,30 +132,61 @@ export function ControlPanel() {
         {alreadyBet ? 'Bet placed' : `Bet ${formatCurrency(stake)}`}
       </button>
 
-      <div
-        className="bulb-count-picker"
-        title={pendingChange ? `Applies next cycle (current: ${snapshot.bulbCount})` : 'Bulb count'}
-      >
-        {BULB_COUNT_OPTIONS.map((count) => (
+      <div className="cp-row cp-row--side">
+        <div className="panel-utility">
           <button
-            key={count}
-            className={`chip-btn ${count === bulbCount ? 'active' : ''}`}
-            onClick={() => setBulbCount(count)}
+            className="chip-btn panel-utility__btn"
+            onClick={() => setMuted(!muted)}
+            aria-label={muted ? 'Unmute sound' : 'Mute sound'}
+            title={muted ? 'Unmute sound' : 'Mute sound'}
           >
-            {count}
+            {muted ? '🔇' : '🔊'}
           </button>
-        ))}
+          <button
+            className="chip-btn panel-utility__btn"
+            onClick={() => setHowToPlayOpen(true)}
+            aria-label="How to play"
+            title="How to play"
+          >
+            ?
+          </button>
+          <button
+            className="chip-btn panel-utility__btn"
+            onClick={() => setPolicyOpen(true)}
+            aria-label="Game policy and rules"
+            title="Game policy and rules"
+          >
+            ⓘ
+          </button>
+        </div>
+
+        <div
+          className="bulb-count-picker"
+          title={pendingChange ? `Applies next cycle (current: ${snapshot.bulbCount})` : 'Bulb count'}
+        >
+          {BULB_COUNT_OPTIONS.map((count) => (
+            <button
+              key={count}
+              className={`chip-btn ${count === bulbCount ? 'active' : ''}`}
+              onClick={() => setBulbCount(count)}
+            >
+              {count}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {alreadyBet && (
-        <div className="control-panel__note">
-          Your bet: bulb {bulbNumber(humanPlayer.bulbId)} · {formatCurrency(humanPlayer.stake)}
-          {humanPlayer.status !== 'active' && ` · ${humanPlayer.status.replace('_', ' ')}`}
-        </div>
-      )}
-      {snapshot.state === 'calculating' && !alreadyBet && (
-        <div className="control-panel__note">Betting is closed — calculating odds…</div>
-      )}
+      {/* Always mounted at a fixed height so the whole bottom bar never
+          grows/shrinks when a note appears — only the text toggles.
+          ("Calculating odds…" note removed: the stage status already says it.) */}
+      <div className="control-panel__note" aria-live="polite">
+        {alreadyBet && (
+          <>
+            Your bet: bulb {bulbNumber(humanPlayer.bulbId)} · {formatCurrency(humanPlayer.stake)}
+            {humanPlayer.status !== 'active' && ` · ${humanPlayer.status.replace('_', ' ')}`}
+          </>
+        )}
+      </div>
 
       <HowToPlayModal open={howToPlayOpen} onClose={() => setHowToPlayOpen(false)} />
       <PolicyModal open={policyOpen} onClose={() => setPolicyOpen(false)} />
