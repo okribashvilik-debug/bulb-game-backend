@@ -554,3 +554,14 @@ pull `cycles`/`live_bets`/`bets` by `cycle_id`).
   `ControlPanel.tsx` (the whole conditional block). Other notes ("Your
   bet…", "calculating odds…") kept. No spacing compensation needed — the
   note was its own wrapped flex line, so the bar just tightens.
+- Full responsive pass (`src/ui/styles.css`): grid columns use
+  `minmax(0,1fr)` so tracks can shrink; new 901–1100px tier (300px side
+  panel); ≤900px stacks top→stage→controls→feeds with natural page scroll
+  (height chain released), stage `clamp(360px,52vh,560px)`, top strip
+  wraps, history dropdown pinned to viewport edges, feed list capped 50vh,
+  full-width bet CTA, bounded decision modal; `(pointer:coarse)` bumps tap
+  targets. IMPORTANT gotcha: component media overrides MUST sit at the
+  BOTTOM of styles.css — equal specificity means source order decides, and
+  overrides placed above the base rules silently lose. Verified at 320/375/
+  667×375/768/1000×700/1024×600/1280×800/1600×900: no horizontal scroll
+  anywhere; desktop stays viewport-locked.

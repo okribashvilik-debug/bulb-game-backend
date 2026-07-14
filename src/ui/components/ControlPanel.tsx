@@ -1,13 +1,34 @@
+import { useState } from 'react';
 import { useGame } from '../GameContext';
-import { bulbNumber, formatCurrency } from '../format';
+import { bulbNumber, formatCoefficient, formatCurrency } from '../format';
 import { getBulbColor } from '../palette';
 import { sfxManager } from '../sfx';
+import { HowToPlayModal } from './HowToPlayModal';
+import { PolicyModal } from './PolicyModal';
+import type { BulbCount } from '../../types';
 
 const QUICK_AMOUNTS = [1, 2, 5, 10] as const;
 const STAKE_STEP = 1;
+// Vertical selector, largest on top per the panel design.
+const BULB_COUNT_OPTIONS: BulbCount[] = [10, 7, 5];
 
 export function ControlPanel() {
-  const { snapshot, myPlayerId, balance, selectedBulbId, setSelectedBulbId, stake, setStake, placeBet } = useGame();
+  const {
+    snapshot,
+    myPlayerId,
+    balance,
+    selectedBulbId,
+    setSelectedBulbId,
+    stake,
+    setStake,
+    placeBet,
+    bulbCount,
+    setBulbCount,
+    muted,
+    setMuted,
+  } = useGame();
+  const [howToPlayOpen, setHowToPlayOpen] = useState(false);
+  const [policyOpen, setPolicyOpen] = useState(false);
 
   const bettingOpen = snapshot.state === 'betting';
   const humanPlayer = snapshot.players.find((p) => p.id === myPlayerId);
@@ -17,8 +38,40 @@ export function ControlPanel() {
 
   const canBet = bettingOpen && !alreadyBet && selectedBulbId !== null && stake > 0 && stake <= balance;
 
+  const pendingChange = bulbCount !== snapshot.bulbCount;
+  // Same convention as the stage labels: nothing is priced before round 1,
+  // so the chips stay clean during idle/betting/calculating.
+  const hasCoefficients = Object.keys(snapshot.liveCoefficients).length > 0;
+
   return (
     <div className="control-panel chrome">
+      <div className="panel-utility">
+        <button
+          className="chip-btn panel-utility__btn"
+          onClick={() => setMuted(!muted)}
+          aria-label={muted ? 'Unmute sound' : 'Mute sound'}
+          title={muted ? 'Unmute sound' : 'Mute sound'}
+        >
+          {muted ? '🔇' : '🔊'}
+        </button>
+        <button
+          className="chip-btn panel-utility__btn"
+          onClick={() => setHowToPlayOpen(true)}
+          aria-label="How to play"
+          title="How to play"
+        >
+          ?
+        </button>
+        <button
+          className="chip-btn panel-utility__btn"
+          onClick={() => setPolicyOpen(true)}
+          aria-label="Game policy and rules"
+          title="Game policy and rules"
+        >
+          ⓘ
+        </button>
+      </div>
+
       <div className="balance-display">
         <span className="balance-display__label">Balance</span>
         <span className="balance-display__value">{formatCurrency(balance)}</span>
@@ -70,6 +123,11 @@ export function ControlPanel() {
       <div className="bulb-picker">
         {snapshot.bulbs.map((bulb) => {
           const color = getBulbColor(bulb.id);
+          const coefficient = snapshot.liveCoefficients[bulb.id];
+          const liveCoeff =
+            coefficient !== undefined && bulb.status !== 'popped'
+              ? formatCoefficient(coefficient)
+              : null;
           return (
             <button
               key={bulb.id}
@@ -82,6 +140,11 @@ export function ControlPanel() {
               style={{ '--bulb-color': color } as React.CSSProperties}
             >
               <span className="bulb-chip__swatch" style={{ backgroundColor: color }} />#{bulbNumber(bulb.id)}
+              {hasCoefficients && (
+                <span className={`bulb-chip__coeff${liveCoeff === null ? ' bulb-chip__coeff--none' : ''}`}>
+                  {liveCoeff ?? '—'}
+                </span>
+              )}
             </button>
           );
         })}
@@ -90,6 +153,21 @@ export function ControlPanel() {
       <button className="bet-button" disabled={!canBet} onClick={placeBet}>
         {alreadyBet ? 'Bet placed' : `Bet ${formatCurrency(stake)}`}
       </button>
+
+      <div
+        className="bulb-count-picker"
+        title={pendingChange ? `Applies next cycle (current: ${snapshot.bulbCount})` : 'Bulb count'}
+      >
+        {BULB_COUNT_OPTIONS.map((count) => (
+          <button
+            key={count}
+            className={`chip-btn ${count === bulbCount ? 'active' : ''}`}
+            onClick={() => setBulbCount(count)}
+          >
+            {count}
+          </button>
+        ))}
+      </div>
 
       {alreadyBet && (
         <div className="control-panel__note">
@@ -100,6 +178,9 @@ export function ControlPanel() {
       {snapshot.state === 'calculating' && !alreadyBet && (
         <div className="control-panel__note">Betting is closed — calculating odds…</div>
       )}
+
+      <HowToPlayModal open={howToPlayOpen} onClose={() => setHowToPlayOpen(false)} />
+      <PolicyModal open={policyOpen} onClose={() => setPolicyOpen(false)} />
     </div>
   );
 }

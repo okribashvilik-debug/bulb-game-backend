@@ -2,12 +2,10 @@ import { useState } from 'react';
 import { useGame } from '../GameContext';
 import { formatCoefficient } from '../format';
 import { getBulbColor } from '../palette';
-import type { BulbCount } from '../../types';
 import type { OutcomeHistoryEntry } from '../useBulbGame';
 
 const COLLAPSED_COUNT = 10;
 const EXPANDED_COUNT = 30;
-const BULB_COUNT_OPTIONS: BulbCount[] = [5, 7, 10];
 
 function coeffTier(coefficient: number | undefined): 1 | 2 | 3 | 4 {
   if (coefficient === undefined) return 1;
@@ -31,13 +29,12 @@ function OutcomeChip({ entry }: { entry: OutcomeHistoryEntry }) {
 }
 
 export function TopStrip() {
-  const { outcomeHistory, bulbCount, setBulbCount, snapshot, muted, setMuted } = useGame();
+  const { outcomeHistory } = useGame();
   const [expanded, setExpanded] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const visible = outcomeHistory.slice(0, expanded ? EXPANDED_COUNT : COLLAPSED_COUNT);
   const canExpand = outcomeHistory.length > COLLAPSED_COUNT;
-  const pendingChange = bulbCount !== snapshot.bulbCount;
   // Same source + ordering convention as the inline chips (newest first).
   const previousRounds = outcomeHistory.slice(0, EXPANDED_COUNT);
 
@@ -82,24 +79,6 @@ export function TopStrip() {
           {expanded ? 'Show less' : 'Previous rounds'}
         </button>
       )}
-      <button
-        className="chip-btn top-strip__mute"
-        onClick={() => setMuted(!muted)}
-        aria-label={muted ? 'Unmute sound' : 'Mute sound'}
-        title={muted ? 'Unmute sound' : 'Mute sound'}
-      >
-        {muted ? '🔇' : '🔊'}
-      </button>
-      <div
-        className="top-strip__bulb-count"
-        title={pendingChange ? `Applies next cycle (current: ${snapshot.bulbCount})` : 'Bulb count'}
-      >
-        {BULB_COUNT_OPTIONS.map((count) => (
-          <button key={count} className={`chip-btn ${count === bulbCount ? 'active' : ''}`} onClick={() => setBulbCount(count)}>
-            {count}
-          </button>
-        ))}
-      </div>
     </div>
   );
 }

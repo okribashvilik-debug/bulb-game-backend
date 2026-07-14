@@ -1,8 +1,15 @@
 import { useMemo } from 'react';
 import { makeParticles, type StageBulb } from '../stage';
+import { formatCoefficient } from '../format';
 
 interface BulbTileProps {
   bulb: StageBulb;
+  /** Live pari-mutuel coefficient for this bulb (undefined when the bulb
+   *  is popped/unstaked — snapshot.liveCoefficients is sparse). */
+  coefficient?: number;
+  /** Whether the coefficient label row is shown at all — false while
+   *  nothing is priced yet (betting/idle), so the stage stays clean. */
+  showCoefficient: boolean;
   /** The player has an open position on this bulb — keeps the existing
    *  "track my bulb" outline affordance from the old flat-disc tile. */
   isMine: boolean;
@@ -30,7 +37,15 @@ interface BulbTileProps {
  * The room-facing light for this bulb (wall glow, flare, cone, floor pool)
  * deliberately does NOT live here — see RoomLighting.tsx.
  */
-export function BulbTile({ bulb, isMine, selected, selectable, onSelect }: BulbTileProps) {
+export function BulbTile({
+  bulb,
+  coefficient,
+  showCoefficient,
+  isMine,
+  selected,
+  selectable,
+  onSelect,
+}: BulbTileProps) {
   const L = bulb.layout;
   // "Powered" states get a travelling spark on the cord; only overcharge
   // additionally gets the jittering arc bolt.
@@ -148,6 +163,19 @@ export function BulbTile({ bulb, isMine, selected, selectable, onSelect }: BulbT
             />
           ))}
       </div>
+
+      {/* Live coefficient, centered under the glass — outside bulb__wrap so
+          the overcharge shake never jitters the number. Same "—" convention
+          as OutcomeChip for bulbs with nothing to price (popped/unstaked);
+          hidden entirely while nothing is priced yet (betting/idle). */}
+      {showCoefficient && (
+        <div
+          className={`bulb__coeff${coefficient === undefined || bulb.state === 'popped' ? ' bulb__coeff--none' : ''}`}
+          style={{ top: L.glassTop + L.s + 6 }}
+        >
+          {coefficient !== undefined && bulb.state !== 'popped' ? formatCoefficient(coefficient) : '—'}
+        </div>
+      )}
 
       {/* Click/tap/keyboard hit target — only mounted while the player can
           actually (re)pick, so outside the betting window there's no

@@ -90,6 +90,10 @@ export function MainEventArea() {
     prevStatesRef.current = nextStates;
   });
 
+  // Nothing is priced before round 1 (liveCoefficients is empty during
+  // idle/betting/calculating) — hide the whole label row until then.
+  const hasCoefficients = Object.keys(snapshot.liveCoefficients).length > 0;
+
   const roundLabel =
     snapshot.state === 'idle' || snapshot.currentRound === 0
       ? null
@@ -104,6 +108,8 @@ export function MainEventArea() {
           <BulbTile
             key={bulb.id}
             bulb={bulb}
+            coefficient={snapshot.liveCoefficients[bulb.id]}
+            showCoefficient={hasCoefficients}
             isMine={bulb.id === myBulbId}
             selected={selectedBulbId === bulb.id}
             selectable={canSelect && bulb.state !== 'popped'}

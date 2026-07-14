@@ -99,7 +99,10 @@ button:disabled {
      content's preferred size so the whole shell always fits the viewport —
      the bottom betting bar can never be pushed below the fold. */
   grid-template-rows: auto minmax(0, 1fr) auto;
-  grid-template-columns: 1fr 340px;
+  /* minmax(0, 1fr) on the main column too: grid tracks otherwise refuse to
+     shrink below their children's min-content width, which is what used to
+     push content past the viewport edge on narrow screens. */
+  grid-template-columns: minmax(0, 1fr) 340px;
   gap: 12px;
   height: 100dvh;
   padding: 12px;
@@ -107,28 +110,48 @@ button:disabled {
   overflow: hidden;
 }
 
+/* Narrow two-column window (small laptop / tablet landscape): keep the
+   side-by-side layout but give the side panel less of the width. */
+@media (max-width: 1100px) and (min-width: 901px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+}
+
+/* One-column mode (phones, tablet portrait): stack top → stage → betting
+   controls → feeds, and scroll the page normally. Betting controls sit
+   directly under the stage so the core loop never requires scrolling past
+   the feed lists. */
 @media (max-width: 900px) {
   .app {
     grid-template-areas:
       'top'
       'main'
-      'right'
-      'bottom';
-    grid-template-columns: 1fr;
+      'bottom'
+      'right';
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto;
     height: auto;
-    min-height: 100vh;
+    min-height: 100dvh;
     overflow: visible;
+    gap: 10px;
+    /* Respect notches/home indicators on iPhones and Android gesture bars
+       (viewport-fit=cover in index.html makes these insets real). */
+    padding: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right))
+      max(10px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
   }
-  /* One-column mode stacks sections and scrolls the page normally. */
+  /* Natural page scroll on stacked layouts: release the fixed 100% height
+     chain so the document itself grows and the browser chrome behaves
+     normally (address-bar collapse, scroll anchoring). */
   html,
   body,
   #root {
-    overflow: auto;
-  }
-  .main-event {
-    min-height: 520px;
+    height: auto;
+    overflow: visible;
   }
 }
+/* (Component-level small-screen overrides live at the BOTTOM of this file —
+   they must come after the base component rules in source order to win.) */
 
 /* UI chrome: flat, quiet surfaces that frame the show. Deliberately
    plainer than the stage — no glow, no gradients, one flat fill. */
@@ -297,13 +320,6 @@ button:disabled {
   text-shadow: 0 0 10px rgba(245, 196, 81, 0.6);
 }
 
-.top-strip__bulb-count {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
-  margin-left: 4px;
-}
-
 /* ==================================================================
    Main event area — the show stage
    (design_handoff_main_event_area: bulbs hanging in a dark room whose
@@ -320,6 +336,16 @@ button:disabled {
      overflow. (The one-column mobile media query below restores a real
      min-height, where whole-page scroll is expected.) */
   min-height: 0;
+}
+/* One-column mode: the stage is a normal stacked section again, so it
+   needs real height back. Placed AFTER the base rule — same specificity,
+   so source order decides, and this must win inside the media query. */
+@media (max-width: 900px) {
+  .main-event {
+    /* Scales with the device: ~half the viewport, floored so bulbs never
+       cramp, capped so tablets don't turn the stage into a wall. */
+    min-height: clamp(360px, 52vh, 560px);
+  }
 }
 
 /* Status caption — centered below the bulbs (spec: 11px uppercase).
@@ -814,6 +840,26 @@ button:disabled {
   padding-top: 26%;
   font-weight: 800;
   transition: color 0.3s ease;
+}
+
+/* Live coefficient under the glass — small, centered, gold ("value going
+   up", same accent OutcomeChip uses). Sits below glassTop + s (positioned
+   inline from StageBulbLayout), clear of rays/shards/hit target, and
+   outside bulb__wrap so the overcharge shake never jitters it. */
+.bulb__coeff {
+  position: absolute;
+  left: 0;
+  transform: translateX(-50%);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--gold);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.bulb__coeff--none {
+  color: var(--text-faint);
+  font-weight: 600;
 }
 
 /* idle: darkest, calmest */
@@ -1387,6 +1433,46 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+/* Left utility column: mute → how-to-play → policy, vertically centered
+   in the panel, one identical gap between all three. Pushed to the far
+   left edge (margin-right auto claims the empty space beside balance). */
+.panel-utility {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  align-self: center;
+  margin-right: auto;
+}
+/* Square utility button: the old top-strip mute chip (~30px) scaled up
+   30% → 39px, icon/font scaled proportionally (12px → 15.6px). */
+.panel-utility__btn {
+  width: 39px;
+  height: 39px;
+  padding: 0;
+  font-size: 15.6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* Right bulb-count column (10 → 7 → 5 top-to-bottom), far right edge,
+   same identical gap as the left column. Active/tooltip behavior comes
+   from .chip-btn.active and the container title, unchanged. */
+.bulb-count-picker {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  align-self: center;
+  margin-left: auto;
+}
+.bulb-count-picker .chip-btn {
+  min-width: 39px;
+  text-align: center;
+}
+
 .balance-display {
   display: flex;
   flex-direction: column;
@@ -1495,28 +1581,44 @@ button:disabled {
   color: var(--gold);
   font-weight: 700;
 }
+/* Popped/unstaked bulb on the chips: muted "—", same convention as
+   OutcomeChip's missing-coefficient dash. */
+.bulb-chip__coeff--none {
+  color: var(--text-faint);
+  font-weight: 600;
+}
 
+/* THE primary action of the whole game — deliberately dominant: biggest
+   control in the panel plus a green glow so it reads as the focal point,
+   not just a larger flat rectangle. Disabled state stays flat/muted. */
 .bet-button {
-  min-width: 160px;
-  height: 52px;
-  padding: 0 24px;
+  min-width: 220px;
+  height: 64px;
+  padding: 0 32px;
   border-radius: var(--radius-cta);
   border: none;
   background: var(--green);
   color: #06210f;
-  font-size: 15.5px;
+  font-size: 19px;
   font-weight: 800;
   letter-spacing: 0.01em;
   white-space: normal;
-  transition: filter 0.12s ease, transform 0.12s ease;
+  box-shadow:
+    0 0 22px color-mix(in srgb, var(--green) 28%, transparent),
+    0 4px 14px rgba(0, 0, 0, 0.35);
+  transition: filter 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
 }
 .bet-button:hover:not(:disabled) {
-  filter: brightness(1.08);
-  transform: translateY(-1px);
+  filter: brightness(1.12);
+  transform: translateY(-2px);
+  box-shadow:
+    0 0 30px color-mix(in srgb, var(--green) 42%, transparent),
+    0 6px 16px rgba(0, 0, 0, 0.4);
 }
 .bet-button:disabled {
   background: var(--surface-2);
   color: var(--text-faint);
+  box-shadow: none;
 }
 
 .control-panel__note {
@@ -1524,6 +1626,90 @@ button:disabled {
   color: var(--text-dim);
   flex-basis: 100%;
   overflow-wrap: anywhere;
+}
+
+/* ==================================================================
+   Info modals — How to Play / Game Policy. Plain informational dialogs:
+   dimmed overlay, ✕ close, internal scroll. Shares the decision modal's
+   dark-surface look but is user-opened, centered, and content-driven.
+   ================================================================== */
+
+.info-modal__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(4, 6, 14, 0.66);
+}
+
+.info-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: min(78vh, 640px);
+  background: var(--surface);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.6);
+}
+
+.info-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.info-modal__title {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--gold);
+  letter-spacing: 0.02em;
+}
+.info-modal__close {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+.info-modal__close:hover {
+  border-color: var(--line-bright);
+  color: var(--text);
+}
+
+.info-modal__body {
+  overflow-y: auto;
+  padding: 16px 20px 20px;
+}
+.info-modal__body section + section {
+  margin-top: 16px;
+}
+.info-modal__body h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text);
+}
+.info-modal__body p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
 }
 
 /* ==================================================================
@@ -1639,4 +1825,98 @@ button:disabled {
 }
 .decision-modal__continue:hover {
   background: var(--surface-2);
+}
+
+/* ==================================================================
+   Responsive overrides — keep these LAST: they share specificity with
+   the base component rules above, so source order is what makes them win.
+   ================================================================== */
+
+@media (max-width: 900px) {
+  .top-strip {
+    flex-wrap: wrap;
+  }
+  .top-strip__brand {
+    border-right: none;
+    padding-right: 0;
+  }
+  /* The dropdown anchors to a mid-bar button; on a narrow screen pin it
+     to the viewport edges instead so it can't hang off-screen. */
+  .top-strip__history-panel {
+    position: fixed;
+    top: 56px;
+    left: 10px;
+    right: 10px;
+    width: auto;
+    max-height: 70vh;
+  }
+  /* The feed list caps itself so the stacked page stays navigable; it
+     scrolls internally past this. */
+  .right-panel__body {
+    max-height: 50vh;
+  }
+  .balance-display {
+    min-width: 0;
+  }
+  .bet-button {
+    /* Primary CTA gets the full row width on phones; slightly shorter than
+       desktop but still the biggest control on screen. */
+    flex: 1 1 100%;
+    min-width: 0;
+    height: 58px;
+    font-size: 17px;
+  }
+  /* Bounded pop-over decision modal: never wider than the phone. */
+  .decision-modal {
+    left: 10px;
+    right: 10px;
+    transform: none;
+    width: auto;
+    max-width: none;
+  }
+  /* Stacked mode: the side columns turn horizontal so the betting panel
+     stays compact — utility row (mute/help/policy) left, bulb-count row
+     (still 10 → 7 → 5, now left-to-right) right, sharing one line. */
+  .panel-utility {
+    flex-direction: row;
+    align-self: auto;
+  }
+  .bulb-count-picker {
+    flex-direction: row;
+    align-self: auto;
+  }
+  /* Info modals: use the full phone width minus overlay padding. */
+  .info-modal {
+    max-height: 84vh;
+  }
+}
+
+/* Touch devices: bump the smallest tap targets toward the 44px guideline
+   without reflowing the pointer-device layout. */
+@media (pointer: coarse) {
+  .chip-btn {
+    padding: 10px 14px;
+  }
+  .stake-control__step {
+    width: 44px;
+    height: 44px;
+  }
+  .stake-control__input {
+    height: 44px;
+    /* 16px is the iOS Safari threshold below which focusing an input
+       auto-zooms the whole page — never go under it on touch devices. */
+    font-size: 16px;
+  }
+  .right-panel__tab {
+    padding: 14px 8px;
+  }
+  /* Utility / close buttons up to the 44px tap-target guideline. */
+  .panel-utility__btn {
+    width: 44px;
+    height: 44px;
+  }
+  .info-modal__close {
+    width: 40px;
+    height: 40px;
+  }
 }
