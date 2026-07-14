@@ -1511,12 +1511,6 @@ button:disabled {
   flex-direction: column;
   gap: 6px;
 }
-.stake-control__label {
-  font-size: 10.5px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
 .stake-control__row {
   display: flex;
   align-items: center;
@@ -1941,8 +1935,9 @@ button:disabled {
     justify-content: space-between;
   }
   .cp-row--side {
-    justify-content: flex-start;
-    gap: 18px;
+    /* Icons pinned left, bulb-count pinned right — the leftover row width
+       becomes the visual gap between the two groups. */
+    justify-content: space-between;
   }
   /* DOM places the bet button before the side row (desktop order); the
      stacked layout wants chips → money → side → bet → note. */

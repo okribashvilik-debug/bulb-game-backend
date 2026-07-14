@@ -55,7 +55,6 @@ export function ControlPanel() {
       </div>
 
       <div className="stake-control">
-        <span className="stake-control__label">Stake</span>
         <div className="stake-control__row">
           <button
             className="chip-btn stake-control__step"
