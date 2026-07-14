@@ -4,12 +4,16 @@
  * imports outcomePlan.ts / parimutuel.ts directly — so the odds model stays
  * swappable without touching state-machine code, as long as a replacement
  * implements this same interface.
+ *
+ * Pricing is stateful per cycle (the shared depleting pool — see
+ * PoolLedger in parimutuel.ts), so the provider hands the engine one
+ * ledger per cycle via createLedger(); all coefficients, cash-out claims
+ * and the final win settlement run through that single ledger instance.
  */
 import { DEFAULT_ODDS_CONFIG, type OddsConfig } from './config';
-import { computeCoefficients } from './parimutuel';
+import { PoolLedger } from './parimutuel';
 import { planCycleOutcome, type CycleOutcomePlan } from './outcomePlan';
 import { DefaultRandomSource, type RandomSource } from '../rng';
-import type { Bulb, Player } from '../types';
 
 export interface OddsProvider {
   /** The house-cut fraction this provider prices with — exposed so callers
@@ -19,12 +23,10 @@ export interface OddsProvider {
   /** Decides the winner + full elimination order for a new cycle. Must be
    *  called once, before betting closes — see outcomePlan.ts. */
   planOutcome(bulbIds: string[]): CycleOutcomePlan;
-  /** Live coefficient for every currently-alive, currently-staked bulb,
-   *  computed fresh from the CURRENT bulb/player state — see parimutuel.ts.
-   *  Bulbs with zero stake are omitted, never given a fallback value. */
-  liveCoefficients(bulbs: Bulb[], players: Player[]): Map<string, number>;
-  /** Converts a stake + coefficient into a payout value. */
-  payoutValue(stake: number, coefficient: number): number;
+  /** One shared money ledger per cycle — created at cycle start, single
+   *  source of truth for pool contributions, live coefficients, and every
+   *  payout (cash-out or win). See PoolLedger in parimutuel.ts. */
+  createLedger(): PoolLedger;
 }
 
 export class PariMutuelEngine implements OddsProvider {
@@ -44,11 +46,7 @@ export class PariMutuelEngine implements OddsProvider {
     return planCycleOutcome(bulbIds, this.rng);
   }
 
-  liveCoefficients(bulbs: Bulb[], players: Player[]): Map<string, number> {
-    return computeCoefficients(bulbs, players, this.config.houseCutRate);
-  }
-
-  payoutValue(stake: number, coefficient: number): number {
-    return stake * coefficient;
+  createLedger(): PoolLedger {
+    return new PoolLedger(this.config.houseCutRate);
   }
 }

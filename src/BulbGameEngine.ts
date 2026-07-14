@@ -42,7 +42,7 @@
 import { isCashOutCheckpoint } from './checkpoints';
 import { defaultClock, type Clock, type TimerHandle } from './clock';
 import { TinyEmitter, type BulbGameEvents } from './events';
-import { computeEliminatedPool, computeHouseTake, totalStakeByBulbId } from './odds/parimutuel';
+import { totalStakeByBulbId, type PoolLedger } from './odds/parimutuel';
 import { PariMutuelEngine, type OddsProvider } from './odds/PariMutuelEngine';
 import type { CycleOutcomePlan } from './odds/outcomePlan';
 import type {
@@ -129,6 +129,18 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
    *  everyone has decided, instead of always waiting out the full timer. */
   private decidedPlayerIds = new Set<string>();
 
+  /** The cycle's single shared money ledger (see PoolLedger): every pool
+   *  contribution, live coefficient, cash-out claim and win settlement
+   *  runs through this one depleting balance — the invariant that total
+   *  pool payouts never exceed 95% of eliminated stakes lives here. */
+  private poolLedger: PoolLedger | undefined;
+  /** Coefficients frozen the moment a decision window opens: everyone
+   *  deciding in the same window sees and gets the same price regardless
+   *  of the order cash-outs land in. Safe against overdraw because the
+   *  per-bulb shares frozen at window-open sum to exactly the pool balance
+   *  at that moment, and every claim still depletes the live balance. */
+  private frozenWindowCoefficients: Map<string, number> | undefined;
+
   /** Bumped on every transition; scheduled safety timers capture the
    *  generation they were created in and no-op if it has since changed. */
   private generation = 0;
@@ -209,12 +221,21 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
 
   /** Live pari-mutuel coefficients for currently-alive, currently-staked
    *  bulbs — see odds/parimutuel.ts. Nothing can be priced until stakes
-   *  are final, so this is empty before the 'calculating' phase finishes. */
+   *  are final, so this is empty before the 'calculating' phase finishes.
+   *  During a decision window the map frozen at window-open is served, so
+   *  every decider in the window prices identically (see the field docs). */
   private computeLiveCoefficients(): Map<string, number> {
     if (this.state === 'idle' || this.state === 'betting' || this.state === 'calculating') {
       return new Map();
     }
-    return this.oddsProvider.liveCoefficients(this.bulbs, this.players);
+    if (
+      (this.state === 'decision_window' || this.state === 'cycle_complete') &&
+      this.frozenWindowCoefficients
+    ) {
+      return this.frozenWindowCoefficients;
+    }
+    if (!this.poolLedger) return new Map();
+    return this.poolLedger.coefficients(this.bulbs, this.players);
   }
 
   // ---------------------------------------------------------------------
@@ -244,6 +265,8 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     this.cancelledInfo = undefined;
     this.houseTake = undefined;
     this.decidedPlayerIds.clear();
+    this.poolLedger = this.oddsProvider.createLedger();
+    this.frozenWindowCoefficients = undefined;
 
     // Integrity-critical: WHO wins and the full elimination order are
     // decided right now — before betting opens, let alone closes, and
@@ -331,6 +354,7 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
   // ---------------------------------------------------------------------
 
   private beginRound(round: number): void {
+    this.frozenWindowCoefficients = undefined; // reprice fresh off the (possibly depleted) pool
     this.currentRound = round;
     this.transitionTo('round_active');
 
@@ -359,19 +383,24 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     popped.status = 'popped';
     popped.poppedInRound = this.currentRound;
 
-    const eliminatedPool = computeEliminatedPool(this.bulbs, this.finalStakeByBulbId!);
-    this.roundPoolHistory.push({
-      round: this.currentRound,
-      eliminatedPool,
-      distributablePool: (1 - this.oddsProvider.houseCutRate) * eliminatedPool,
-    });
-
     const affectedPlayers = this.players.filter(
       (p) => p.bulbId === popped.id && p.status === 'active',
     );
     for (const player of affectedPlayers) {
       player.status = 'popped';
     }
+
+    // Only money still in the game enters the pool: a cashed-out player's
+    // stake already left with their payout, so it must not be redistributed
+    // a second time. The ledger takes the flat house cut here, per round,
+    // unconditionally, and banks the 95% remainder for survivors.
+    const contribution = affectedPlayers.reduce((sum, p) => sum + p.stake, 0);
+    this.poolLedger!.recordElimination(contribution);
+    this.roundPoolHistory.push({
+      round: this.currentRound,
+      eliminatedPool: this.poolLedger!.eliminatedPool,
+      distributablePool: this.poolLedger!.remainingPool,
+    });
 
     this.emit('bulbPopped', {
       bulb: { ...popped },
@@ -407,6 +436,12 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
 
   private beginDecisionWindow(): void {
     this.decidedPlayerIds.clear();
+    // Freeze this window's prices before anyone can act: every decider in
+    // the window sees and receives the same coefficient regardless of who
+    // cashes out first. The frozen per-bulb shares sum to exactly the pool
+    // balance right now, and each claim still depletes the live ledger, so
+    // no interleaving of same-window cash-outs can overdraw the pool.
+    this.frozenWindowCoefficients = this.poolLedger!.coefficients(this.bulbs, this.players);
     this.transitionTo('decision_window');
 
     const eligiblePlayerIds = this.getEligibleDeciders().map((p) => p.id);
@@ -455,7 +490,10 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
       // by definition, so it always has a coefficient by now.
       throw new Error(`No live coefficient available for bulb "${player.bulbId}"`);
     }
-    const value = this.oddsProvider.payoutValue(player.stake, coefficient);
+    // claim() both computes the payout and permanently subtracts the pool
+    // portion from the shared cycle ledger — the depletion IS the fix for
+    // the historical double-payout bug, not a display-time clamp.
+    const value = this.poolLedger!.claim(player.stake, coefficient);
 
     player.status = 'cashed_out';
     player.result = { round: this.currentRound, value };
@@ -530,17 +568,24 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
       ? this.players.filter((p) => p.bulbId === winningBulbId && p.status === 'active')
       : [];
 
-    // Priced from the exact same formula as every mid-round cash-out — at
-    // this point every bulb except the winner is 'popped', so eliminated_pool
-    // covers the whole losing field and this one lookup IS the win payout.
-    const finalCoefficients = this.computeLiveCoefficients();
+    // Priced from the exact same ledger as every mid-round cash-out — at
+    // this point the winner's bulb is the only alive staked bulb (N = 1),
+    // so its coefficient is 1 + remainingPool/stake and the winners'
+    // claims drain whatever genuinely remains of the pool, no more.
+    // Frozen for post-settlement snapshots: once the winners' claims drain
+    // the ledger, repricing live would collapse the displayed coefficient
+    // to ~1 — the snapshot must keep showing the price actually paid.
+    const finalCoefficients = this.poolLedger
+      ? this.poolLedger.coefficients(this.bulbs, this.players)
+      : new Map<string, number>();
+    this.frozenWindowCoefficients = finalCoefficients;
     let claimedByWinners = 0;
     for (const player of winners) {
       const coefficient = finalCoefficients.get(player.bulbId)!;
-      const value = this.oddsProvider.payoutValue(player.stake, coefficient);
+      const value = this.poolLedger!.claim(player.stake, coefficient);
       player.status = 'won';
       player.result = { round: this.currentRound, value };
-      claimedByWinners += value;
+      claimedByWinners += value - player.stake; // pool portion only — their own stake isn't pool money
     }
 
     // Anyone who popped earlier and is still marked 'popped' effectively
@@ -552,14 +597,13 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     }
 
     // A cash-out is final (see PlayerStatus) — anyone who left the winning
-    // bulb early has no further claim, so if `winners` came up empty (or
-    // only covers part of that bulb's total stake), part of the
-    // distributable pool has no claimant left. Undefined winningBulbId
-    // (the uncontested/cancelled path never reaches endCycle) shouldn't
-    // occur here, but this stays defensive rather than assuming.
+    // bulb early has no further claim, so whatever the ledger still holds
+    // after the winners' claims has no claimant and stays with the house
+    // on top of the flat per-round cut. Undefined winningBulbId (the
+    // uncontested/cancelled path never reaches endCycle) shouldn't occur
+    // here, but this stays defensive rather than assuming.
     if (winningBulbId !== undefined) {
-      const eliminatedPool = computeEliminatedPool(this.bulbs, this.finalStakeByBulbId!);
-      this.houseTake = computeHouseTake(eliminatedPool, this.oddsProvider.houseCutRate, claimedByWinners);
+      this.houseTake = this.poolLedger!.houseTakeBreakdown(claimedByWinners);
     }
 
     this.emit('cycleComplete', {

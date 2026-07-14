@@ -1,36 +1,63 @@
 /**
- * The single formula the whole pari-mutuel model is built on.
+ * The pari-mutuel pool model, built around one hard business invariant:
  *
- * For a bulb `i` still alive at round `r`:
- *   eliminated_pool(r)     = total stake (across all players) on every bulb
- *                            that has already popped by round r
- *   distributable_pool(r)  = (1 - houseCutRate) * eliminated_pool(r)
- *   live_coefficient_i(r)  = 1 + distributable_pool(r) / total_stake_on_bulb_i
+ *   THE HOUSE NEVER RISKS ITS OWN MONEY. Players bet against each other.
+ *   Each round, the stakes of players eliminated that round form a pool;
+ *   the house keeps a flat `houseCutRate` (5%) of that pool, uncondition-
+ *   ally, and the remaining 95% belongs to the surviving players. Across a
+ *   whole cycle, everything ever paid out of the pool (mid-cycle cash-outs
+ *   plus the final win) can never exceed that 95% — because it is all
+ *   drawn from ONE shared, depleting ledger (PoolLedger below), never from
+ *   independent per-bulb copies of the same money.
  *
- * The house only ever cuts the LOSING pool — a bulb's own stake, and every
- * other still-alive bulb's stake, are never taxed. This same formula prices
- * both a mid-round cash-out and the final win payout: at the last round,
- * eliminated_pool includes every bulb except the winner, so it falls out of
- * this one formula with no separate "fixed payout" calculation needed.
+ * How the 95% is divided (a deliberate game-design decision — see the
+ * PoolLedger.coefficients() comment for the full reasoning):
  *
- * If nobody has staked on a bulb, its coefficient is mathematically
- * undefined (division by zero) — callers must treat `undefined` as "blank,"
- * never coerce it to 0 or any other fallback number.
+ *   - Each ALIVE bulb that still has active (not cashed-out) stake gets an
+ *     equal 1/N share of the remaining pool, where N is the number of such
+ *     bulbs. Bettors within a bulb split their bulb's share proportional
+ *     to stake.
+ *   - So for bulb `i`:  live_coefficient_i = 1 + (remainingPool / N) / S_i
+ *     where S_i is the ACTIVE stake on bulb i. Different bulbs still carry
+ *     different coefficients (small-stake bulbs pay bigger multiples), but
+ *     the sum of every bulb's maximum possible claim is exactly the
+ *     remaining pool — never more.
+ *   - At the final round N = 1, so the winner's coefficient degenerates to
+ *     1 + remainingPool / S_winner — the same shape as the historical win
+ *     payout formula. Hold-to-resolution economics are unchanged by this
+ *     fix; only overlapping mid-cycle cash-outs price differently.
+ *
+ * Two further consequences of "the pool is real money, not a formula":
+ *
+ *   - A cash-out removes the player's stake from the game along with their
+ *     pool claim. If their bulb later pops, that stake does NOT enter the
+ *     eliminated pool (the money already left in their payout) — only the
+ *     stakes of players still in the game when their bulb pops do.
+ *   - Every claim (cash-out or win) immediately depletes `remainingPool`,
+ *     so later claimants — same window or later rounds — price against
+ *     what is actually left, not against a static snapshot.
+ *
+ * If nobody has active stake on a bulb, its coefficient is undefined —
+ * callers must treat `undefined` as "blank," never coerce it to 0 or any
+ * fallback number.
  */
 import type { Bulb, HouseTakeBreakdown, Player } from '../types';
 
+/** Coefficient for a bulb whose active stake is `activeStakeOnBulb` and
+ *  whose reserved share of the remaining pool is `bulbPoolShare`:
+ *  1 + share/stake. Undefined (never 0, never a fallback) when the bulb has
+ *  no active stake to price against. */
 export function computeCoefficient(
-  stakeOnBulb: number,
-  eliminatedPool: number,
-  houseCutRate: number,
+  activeStakeOnBulb: number,
+  bulbPoolShare: number,
 ): number | undefined {
-  if (stakeOnBulb <= 0) return undefined;
-  const distributablePool = (1 - houseCutRate) * eliminatedPool;
-  return 1 + distributablePool / stakeOnBulb;
+  if (activeStakeOnBulb <= 0) return undefined;
+  return 1 + bulbPoolShare / activeStakeOnBulb;
 }
 
-/** Total stake, across all players, on every bulb — keyed by bulb id.
- *  Bulbs nobody bet on simply don't appear as a key. */
+/** Total stake, across ALL players regardless of status, on every bulb —
+ *  keyed by bulb id. This is the audit-trail record of what was wagered;
+ *  pricing uses activeStakeByBulbId() instead. */
 export function totalStakeByBulbId(players: Player[]): Map<string, number> {
   const totals = new Map<string, number>();
   for (const player of players) {
@@ -39,63 +66,42 @@ export function totalStakeByBulbId(players: Player[]): Map<string, number> {
   return totals;
 }
 
-/** Sum of `totalStakeByBulbId` over every bulb currently in `'popped'`
- *  status — the losing pool the live coefficient formula redistributes. */
-export function computeEliminatedPool(bulbs: Bulb[], stakeByBulbId: Map<string, number>): number {
-  let pool = 0;
-  for (const bulb of bulbs) {
-    if (bulb.status === 'popped') {
-      pool += stakeByBulbId.get(bulb.id) ?? 0;
-    }
+/** Stake still IN the game per bulb — only players with status 'active'.
+ *  A cashed-out player's stake left with them; a popped player's stake has
+ *  moved into the pool. Pricing and pool contributions both run on this. */
+export function activeStakeByBulbId(players: Player[]): Map<string, number> {
+  const totals = new Map<string, number>();
+  for (const player of players) {
+    if (player.status !== 'active') continue;
+    totals.set(player.bulbId, (totals.get(player.bulbId) ?? 0) + player.stake);
   }
-  return pool;
-}
-
-/** Live coefficient for every currently-alive bulb, keyed by bulb id. Bulbs
- *  with zero stake are omitted entirely (never a 0 or fallback entry) — see
- *  computeCoefficient(). */
-export function computeCoefficients(
-  bulbs: Bulb[],
-  players: Player[],
-  houseCutRate: number,
-): Map<string, number> {
-  const stakeByBulbId = totalStakeByBulbId(players);
-  const eliminatedPool = computeEliminatedPool(bulbs, stakeByBulbId);
-
-  const coefficients = new Map<string, number>();
-  for (const bulb of bulbs) {
-    if (bulb.status !== 'alive') continue;
-    const stake = stakeByBulbId.get(bulb.id) ?? 0;
-    const coefficient = computeCoefficient(stake, eliminatedPool, houseCutRate);
-    if (coefficient !== undefined) coefficients.set(bulb.id, coefficient);
-  }
-  return coefficients;
+  return totals;
 }
 
 /**
  * Splits a completed cycle's house take into the flat edge versus the
- * portion left unclaimed because everyone eligible to claim it had already
- * cashed out. A cash-out is final (see PlayerStatus) — a player who leaves
- * has no further claim on the cycle. `claimedByWinners` is whatever the
- * caller actually paid to still-active bettors on the winning bulb at
- * settlement; anything the formula made available beyond that has no
- * remaining claimant and stays with the house.
+ * portion of the pool nobody was left to claim. All `claimed*` figures are
+ * POOL money only — returned stakes are the player's own money coming
+ * back, never part of the pool, so they don't appear here.
  *
- * This derives purely from numbers the caller already has (eliminatedPool
- * + what was actually paid) — it does not recompute or alter the
- * live_coefficient formula itself, it only accounts for what that formula
- * already implies.
+ * `claimedByWinners` is the pool money paid to still-active bettors on the
+ * winning bulb at final settlement; `claimedEarlier` is the pool money
+ * already paid out via mid-cycle cash-outs (on any bulb). Whatever's left
+ * of the distributable pool after both has no remaining claimant — a
+ * cash-out is final (see PlayerStatus) — and stays with the house.
  */
 export function computeHouseTake(
   eliminatedPool: number,
   houseCutRate: number,
   claimedByWinners: number,
+  claimedEarlier = 0,
 ): HouseTakeBreakdown {
   const standardCut = houseCutRate * eliminatedPool;
   const distributablePool = eliminatedPool - standardCut;
-  // Floors a hairline-negative float artifact to 0 — claimedByWinners can
-  // never legitimately exceed distributablePool by construction.
-  const unclaimedPool = Math.max(0, distributablePool - claimedByWinners);
+  // Floors a hairline-negative float artifact to 0 — total claims can
+  // never legitimately exceed distributablePool: every claim came out of
+  // the depleting PoolLedger, which never goes below zero.
+  const unclaimedPool = Math.max(0, distributablePool - claimedEarlier - claimedByWinners);
   return {
     eliminatedPool,
     standardCut,
@@ -104,4 +110,128 @@ export function computeHouseTake(
     unclaimedPool,
     totalHouseTake: standardCut + unclaimedPool,
   };
+}
+
+/**
+ * The per-cycle shared money ledger — the fix for the double-payout bug.
+ *
+ * Previously every alive bulb was priced as `1 + fullPool / ownStake`,
+ * each against an independent full copy of the distributable pool; if
+ * bettors on two different alive bulbs both cashed out, the same pool
+ * dollars were paid twice and the house covered the difference. This
+ * ledger makes the pool a single depleting balance: contributions come in
+ * only from stakes actually still in the game when their bulb pops, every
+ * claim immediately subtracts, and pricing always divides what genuinely
+ * remains. `remainingPool` can never go negative under any interleaving of
+ * cash-outs, because the per-bulb shares handed out at any moment sum to
+ * exactly `remainingPool` — see coefficients().
+ */
+export class PoolLedger {
+  readonly houseCutRate: number;
+
+  /** Cumulative EFFECTIVE eliminated stakes: only money still in the game
+   *  when its bulb popped. (A cashed-out player's stake already left with
+   *  their payout — re-adding it here would pay the same dollars twice.) */
+  private eliminated = 0;
+  /** houseCutRate × eliminated, accrued per pop — flat and unconditional. */
+  private standardCut = 0;
+  /** The live 95% balance available to survivors right now. */
+  private remaining = 0;
+  /** Cumulative pool money already paid out via claims (excludes returned
+   *  stakes — those are the players' own money). */
+  private claimed = 0;
+
+  constructor(houseCutRate: number) {
+    this.houseCutRate = houseCutRate;
+  }
+
+  get eliminatedPool(): number {
+    return this.eliminated;
+  }
+
+  get standardCutTotal(): number {
+    return this.standardCut;
+  }
+
+  get remainingPool(): number {
+    return this.remaining;
+  }
+
+  get claimedFromPool(): number {
+    return this.claimed;
+  }
+
+  /** A bulb popped: `activeStakeOnBulb` is the total stake of players who
+   *  were still active on it (they're now popped/losers). The house cut is
+   *  taken here, per round, unconditionally; the rest joins the shared
+   *  pool. */
+  recordElimination(activeStakeOnBulb: number): void {
+    if (activeStakeOnBulb <= 0) return;
+    this.eliminated += activeStakeOnBulb;
+    this.standardCut += this.houseCutRate * activeStakeOnBulb;
+    this.remaining += (1 - this.houseCutRate) * activeStakeOnBulb;
+  }
+
+  /**
+   * Live coefficient for every alive bulb with active stake.
+   *
+   * DESIGN DECISION (how simultaneously-alive bulbs share one pool):
+   * each of the N alive-and-actively-staked bulbs is reserved an equal
+   * 1/N slice of `remainingPool`; a bulb's bettors split their bulb's
+   * slice proportional to stake, giving
+   *
+   *     c_i = 1 + (remainingPool / N) / activeStake_i
+   *
+   * Why equal-per-bulb rather than proportional-to-stake across all
+   * survivors: proportional-to-stake (share_i = remaining × S_i/ΣS) makes
+   * every alive bulb's coefficient collapse to the identical value
+   * 1 + remaining/ΣS — flattening exactly the per-bulb variety the game
+   * is built on. Equal-per-bulb keeps small-stake bulbs paying visibly
+   * bigger multiples (share is fixed, divisor is smaller) while still
+   * summing every bulb's maximum claim to exactly `remainingPool`, which
+   * is what makes the no-overpayment invariant unconditional: even if
+   * every active player on every alive bulb cashes out in the same
+   * window, total claims = remainingPool, never a dollar more. Within a
+   * bulb, the split IS proportional to stake, per the business rule.
+   */
+  coefficients(bulbs: Bulb[], players: Player[]): Map<string, number> {
+    const activeStakes = activeStakeByBulbId(players);
+    const aliveStakedBulbs = bulbs.filter(
+      (b) => b.status === 'alive' && (activeStakes.get(b.id) ?? 0) > 0,
+    );
+
+    const result = new Map<string, number>();
+    if (aliveStakedBulbs.length === 0) return result;
+
+    const perBulbShare = this.remaining / aliveStakedBulbs.length;
+    for (const bulb of aliveStakedBulbs) {
+      const stake = activeStakes.get(bulb.id)!;
+      const coefficient = computeCoefficient(stake, perBulbShare);
+      if (coefficient !== undefined) result.set(bulb.id, coefficient);
+    }
+    return result;
+  }
+
+  /** Pays one player at `coefficient`: returns the full payout value
+   *  (their own stake back + their pool claim) and PERMANENTLY subtracts
+   *  the pool-claim portion from the shared balance, so every later claim
+   *  — same decision window or later rounds — prices against what is
+   *  actually left. */
+  claim(stake: number, coefficient: number): number {
+    const poolClaim = stake * (coefficient - 1);
+    // Floor guards float dust only; by construction the shares handed out
+    // at any pricing moment sum to <= remaining, so a genuine overdraw is
+    // impossible. Not a business-rule clamp — see coefficients().
+    this.remaining = Math.max(0, this.remaining - poolClaim);
+    this.claimed += poolClaim;
+    return stake + poolClaim;
+  }
+
+  /** Final-settlement breakdown. `claimedByWinners` = pool money paid to
+   *  the winning bulb's still-active bettors (their returned stakes
+   *  excluded); everything claimed before that was mid-cycle cash-outs. */
+  houseTakeBreakdown(claimedByWinners: number): HouseTakeBreakdown {
+    const claimedEarlier = this.claimed - claimedByWinners;
+    return computeHouseTake(this.eliminated, this.houseCutRate, claimedByWinners, claimedEarlier);
+  }
 }

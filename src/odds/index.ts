@@ -1,8 +1,8 @@
 export { DEFAULT_ODDS_CONFIG, type OddsConfig } from './config';
 export {
+  PoolLedger,
+  activeStakeByBulbId,
   computeCoefficient,
-  computeCoefficients,
-  computeEliminatedPool,
   computeHouseTake,
   totalStakeByBulbId,
 } from './parimutuel';
@@ -11,6 +11,7 @@ export { PariMutuelEngine, type OddsProvider } from './PariMutuelEngine';
 export {
   runPariMutuelSimulation,
   runCashOutBehaviorSimulation,
+  simulateCycleWithCashOuts,
   ALL_SCENARIOS,
   ALL_CASHOUT_BEHAVIORS,
   concentratedScenario,

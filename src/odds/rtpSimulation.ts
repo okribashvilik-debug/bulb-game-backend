@@ -1,34 +1,30 @@
 /**
  * Simulation harness for the pari-mutuel odds engine.
  *
- * There is no fixed RTP target to converge to anymore — house take is now
- * an emergent consequence of how stakes happen to be distributed across
- * bulbs in a given cycle, not a guaranteed constant. This harness instead
- * runs a range of realistic player-count / stake-distribution scenarios and
- * reports the ACTUAL house take as a percentage of total volume wagered,
- * so it can be eyeballed for sanity (e.g. "does it ever pay out more than
- * was staked?") rather than asserted against a target percentage.
+ * There is no fixed RTP target to converge to — house take is an emergent
+ * consequence of how stakes are distributed and when players cash out, not
+ * a guaranteed constant. This harness runs realistic player-count /
+ * stake-distribution scenarios and reports the ACTUAL house take, so the
+ * hard invariant can be proven at scale rather than assumed:
+ *
+ *   Total pool money ever paid out in a cycle (all cash-outs + the final
+ *   win) never exceeds (1 - houseCutRate) x the cycle's eliminated
+ *   stakes, and per-cycle house take is never below the flat cut on the
+ *   effective eliminated pool — i.e. never negative, house money never at
+ *   risk. See PoolLedger in parimutuel.ts for the mechanism.
  *
  * Two simulation modes live in this file:
  *
  *  - runPariMutuelSimulation() — every player holds to natural resolution
- *    (never cashes out early). Cash-out pricing uses the exact same formula
- *    as the final win payout (see parimutuel.ts), so hold-to-resolution
- *    already exercises the whole pricing model on its own; kept as-is since
- *    it's the simplest possible measurement and existing tests depend on it.
- *  - runCashOutBehaviorSimulation() — actually drives round-by-round
- *    cash-out decisions (see CashOutBehavior below) and reports the full
- *    distribution of house take, not just an average. The standard 5%
- *    house-cut rate is a FLOOR under this model, not a ceiling: when
- *    everyone who bet on the eventual winning bulb cashes out before the
- *    cycle ends, their share of the final distributable pool has no
- *    claimant left and stays with the house too (see computeHouseTake() in
- *    parimutuel.ts) — this function is what surfaces how much that actually
- *    adds up to, across many cycles and behavior patterns, instead of
- *    leaving it as an implicit side effect nobody measured.
+ *    (never cashes out early). Kept as the simplest measurement; identical
+ *    economics to the pre-ledger model, since with a single final claimant
+ *    the ledger's N=1 coefficient is the historical 1 + pool/stake.
+ *  - runCashOutBehaviorSimulation() — drives round-by-round cash-out
+ *    decisions (see CashOutBehavior) through the same PoolLedger the real
+ *    engine uses, and reports the full distribution of house take.
  */
 import { isCashOutCheckpoint } from '../checkpoints';
-import { computeCoefficients, computeEliminatedPool, totalStakeByBulbId } from './parimutuel';
+import { PoolLedger } from './parimutuel';
 import { planCycleOutcome } from './outcomePlan';
 import { DEFAULT_ODDS_CONFIG, type OddsConfig } from './config';
 import { DefaultRandomSource, type RandomSource } from '../rng';
@@ -92,23 +88,31 @@ export function runPariMutuelSimulation(options: {
 
     const { winningBulbId, eliminationOrder } = planCycleOutcome(bulbIds, rng);
     const bulbs: Bulb[] = bulbIds.map((id) => ({ id, status: 'alive' as const }));
+    const ledger = new PoolLedger(config.houseCutRate);
 
-    // Reveal pops one at a time, exactly as the real engine does, pricing
-    // every remaining bulb after each pop — the winner is only priced once
-    // every other bulb has already popped, which is what makes the win
-    // payout fall out of the same formula as a mid-round cash-out.
+    // Reveal pops one at a time, exactly as the real engine does, feeding
+    // each popped bulb's still-in-play stake into the shared pool — the
+    // winner is only priced once every other bulb has already popped.
     for (const poppedId of eliminationOrder) {
       const popped = bulbs.find((b) => b.id === poppedId)!;
       popped.status = 'popped';
+      let contribution = 0;
+      for (const p of players) {
+        if (p.bulbId === popped.id && p.status === 'active') {
+          p.status = 'popped';
+          contribution += p.stake;
+        }
+      }
+      ledger.recordElimination(contribution);
     }
 
-    const coefficients = computeCoefficients(bulbs, players, config.houseCutRate);
+    const coefficients = ledger.coefficients(bulbs, players);
     for (const player of players) {
       totalWagered += player.stake;
-      if (player.bulbId === winningBulbId) {
+      if (player.bulbId === winningBulbId && player.status === 'active') {
         const coefficient = coefficients.get(player.bulbId);
         if (coefficient !== undefined) {
-          totalPaidOut += player.stake * coefficient;
+          totalPaidOut += ledger.claim(player.stake, coefficient);
         }
       }
     }
@@ -197,7 +201,7 @@ export const ALL_SCENARIOS: StakeScenario[] = [
 ];
 
 // -------------------------------------------------------------------------
-// Cash-out behavior simulation — the "unclaimed pool" harness
+// Cash-out behavior simulation — proves the shared-pool invariant
 // -------------------------------------------------------------------------
 
 /** A strategy for deciding, at each cash-out checkpoint, whether an active
@@ -216,10 +220,10 @@ export const neverCashOutBehavior: CashOutBehavior = {
   shouldCashOut: () => false,
 };
 
-/** Every active player cashes out the first chance they get. The scenario
- *  the task's "unclaimed pool" behavior is named for: if this empties out
- *  the eventual winning bulb before the cycle ends, its whole final share
- *  of the pool goes unclaimed. */
+/** Every active player cashes out the first chance they get — historically
+ *  the pattern that overdrew the pool (every alive bulb was priced against
+ *  its own full copy of the pool). Under the shared depleting ledger this
+ *  is exactly the worst case the invariant must hold for. */
 export const alwaysCashOutBehavior: CashOutBehavior = {
   name: 'everyone cashes out at first opportunity',
   shouldCashOut: () => true,
@@ -240,21 +244,31 @@ export const ALL_CASHOUT_BEHAVIORS: CashOutBehavior[] = [
 
 /** One simulated cycle's money-conservation ledger: every dollar wagered is
  *  either paid out (at a cash-out, on any bulb, at any round, or as the
- *  final win payout) or kept by the house. `standardCut`/`unclaimedPool`
- *  additionally break down the house's take at FINAL settlement only (see
- *  computeHouseTake()) — a subset of `houseTake`, not the whole of it,
- *  since an early cash-out on a bulb that later loses is a separate payout
- *  event already reflected in `paidOut`, not part of either breakdown term. */
+ *  final win payout) or kept by the house. `eliminatedPool`/`poolPaidOut`
+ *  expose the invariant directly: poolPaidOut can never exceed
+ *  (1 - houseCutRate) x eliminatedPool. */
 export interface CycleHouseTakeSample {
   wagered: number;
   paidOut: number;
   houseTake: number;
   houseTakePct: number;
+  /** Effective eliminated stakes — money still in the game when its bulb
+   *  popped (a cashed-out player's stake left with them). */
+  eliminatedPool: number;
+  /** Flat houseCutRate x eliminatedPool, accrued per round. */
   standardCut: number;
+  /** Pool money paid out across the whole cycle (cash-outs + win),
+   *  EXCLUDING returned own stakes. */
+  poolPaidOut: number;
+  /** Whatever remained of the distributable pool at settlement with no
+   *  claimant left — stays with the house on top of the standard cut. */
   unclaimedPool: number;
 }
 
-function simulateCycleWithCashOuts(
+/** Simulates one full cycle through the same PoolLedger the live engine
+ *  uses, including frozen-at-window-open pricing. Exported so tests can
+ *  assert the invariant per-cycle, not just on aggregates. */
+export function simulateCycleWithCashOuts(
   bulbCount: BulbCount,
   stakes: Array<{ bulbIndex: number; stake: number }>,
   rng: RandomSource,
@@ -274,48 +288,53 @@ function simulateCycleWithCashOuts(
 
   const { winningBulbId, eliminationOrder } = planCycleOutcome(bulbIds, rng);
   const bulbs: Bulb[] = bulbIds.map((id) => ({ id, status: 'alive' as const }));
+  const ledger = new PoolLedger(config.houseCutRate);
   const wagered = players.reduce((sum, p) => sum + p.stake, 0);
   let paidOut = 0;
 
   for (const poppedId of eliminationOrder) {
     const popped = bulbs.find((b) => b.id === poppedId)!;
     popped.status = 'popped';
+    let contribution = 0;
     for (const p of players) {
-      if (p.bulbId === popped.id && p.status === 'active') p.status = 'popped';
+      if (p.bulbId === popped.id && p.status === 'active') {
+        p.status = 'popped';
+        contribution += p.stake;
+      }
     }
+    ledger.recordElimination(contribution);
 
     const aliveCount = bulbs.filter((b) => b.status === 'alive').length;
+    if (aliveCount <= 1) break; // cycle over — winner settles below
     if (!isCashOutCheckpoint(bulbCount, aliveCount)) continue;
 
-    // Live coefficients as of right now — same formula every mid-round
-    // cash-out and the final win payout both use, just evaluated early.
-    const coefficients = computeCoefficients(bulbs, players, config.houseCutRate);
+    // Frozen at window open, exactly like the engine: every decider in
+    // this window prices identically, and each claim still depletes the
+    // live ledger so the frozen shares can never collectively overdraw.
+    const coefficients = ledger.coefficients(bulbs, players);
     for (const p of players) {
       if (p.status !== 'active') continue;
       if (!behavior.shouldCashOut(rng)) continue;
       const coefficient = coefficients.get(p.bulbId);
       if (coefficient === undefined) continue; // can't happen: an active player always has stake on an alive bulb
-      paidOut += p.stake * coefficient;
+      paidOut += ledger.claim(p.stake, coefficient);
       p.status = 'cashed_out';
     }
   }
 
-  // Final settlement: every bulb but the winner is now 'popped'.
-  const finalStakeByBulbId = totalStakeByBulbId(players);
-  const eliminatedPool = computeEliminatedPool(bulbs, finalStakeByBulbId);
-  const standardCut = config.houseCutRate * eliminatedPool;
-  const distributablePool = eliminatedPool - standardCut;
-  const finalCoefficients = computeCoefficients(bulbs, players, config.houseCutRate);
-
+  // Final settlement: the winner's bulb is the only alive staked bulb left
+  // (N = 1), so its still-active bettors drain whatever genuinely remains.
+  const finalCoefficients = ledger.coefficients(bulbs, players);
   let claimedByWinners = 0;
   for (const p of players) {
     if (p.bulbId !== winningBulbId || p.status !== 'active') continue;
     const coefficient = finalCoefficients.get(p.bulbId)!;
-    const value = p.stake * coefficient;
+    const value = ledger.claim(p.stake, coefficient);
     paidOut += value;
-    claimedByWinners += value;
+    claimedByWinners += value - p.stake;
   }
-  const unclaimedPool = Math.max(0, distributablePool - claimedByWinners);
+
+  const breakdown = ledger.houseTakeBreakdown(claimedByWinners);
   const houseTake = wagered - paidOut;
 
   return {
@@ -323,8 +342,10 @@ function simulateCycleWithCashOuts(
     paidOut,
     houseTake,
     houseTakePct: wagered > 0 ? houseTake / wagered : 0,
-    standardCut,
-    unclaimedPool,
+    eliminatedPool: ledger.eliminatedPool,
+    standardCut: breakdown.standardCut,
+    poolPaidOut: ledger.claimedFromPool,
+    unclaimedPool: breakdown.unclaimedPool,
   };
 }
 
@@ -342,14 +363,12 @@ export interface CashOutSimulationResult {
    *  PariMutuelSimulationResult.houseTakePct. */
   aggregateHouseTakePct: number;
   /** Distribution of PER-CYCLE house-take-as-%-of-that-cycle's-own-wagered
-   *  volume, across every contested cycle. This is what actually shows the
-   *  5% edge is a floor, not a ceiling — min/max/median can sit well above
-   *  (or, in principle, below) the aggregate depending on cash-out timing. */
+   *  volume, across every contested cycle. With the shared depleting pool
+   *  the minimum is bounded below by the flat cut on the effective
+   *  eliminated pool — it can no longer go negative. */
   distribution: { min: number; max: number; median: number; average: number };
-  /** Standard 5%-edge and unclaimed-pool shares, each as a fraction of
-   *  total volume wagered across contested cycles — the same split
-   *  computeHouseTake() logs per-cycle in the audit trail, aggregated here
-   *  so the two sources of house take are visible independently at scale. */
+  /** Standard cut and final-settlement unclaimed pool, each as a fraction
+   *  of total volume wagered across contested cycles. */
   standardCutShareOfVolume: number;
   unclaimedPoolShareOfVolume: number;
 }

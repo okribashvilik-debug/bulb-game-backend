@@ -98,7 +98,12 @@ export interface CycleSnapshot {
 
 /** One round's snapshot of the pari-mutuel pool math, recorded as it
  *  happens — part of CycleAuditRecord so a cycle's entire payout history
- *  can be independently re-derived later. */
+ *  can be independently re-derived later.
+ *  `eliminatedPool` is the cumulative EFFECTIVE eliminated stake (money
+ *  still in the game when its bulb popped — a cashed-out player's stake
+ *  left with them); `distributablePool` is the shared pool's live balance
+ *  right after the pop, i.e. net of every claim already paid out of it
+ *  (see PoolLedger in odds/parimutuel.ts). */
 export interface RoundPoolRecord {
   round: number;
   eliminatedPool: number;
@@ -118,28 +123,28 @@ export interface RoundPoolRecord {
  * unlogged side effect.
  */
 export interface HouseTakeBreakdown {
-  /** Total stake on every losing bulb this cycle (every bulb but the
-   *  winner) — the same number the last RoundPoolRecord.eliminatedPool
-   *  entry holds. */
+  /** EFFECTIVE eliminated stake this cycle: money still in the game when
+   *  its bulb popped. A cashed-out player's stake left with their payout,
+   *  so it never re-enters the pool — same number the last
+   *  RoundPoolRecord.eliminatedPool entry holds. */
   eliminatedPool: number;
-  /** houseCutRate * eliminatedPool — the flat edge that applies regardless
-   *  of anyone's cash-out behavior. */
+  /** houseCutRate * eliminatedPool — the flat edge, accrued per round,
+   *  unconditional regardless of anyone's cash-out behavior. */
   standardCut: number;
-  /** eliminatedPool - standardCut: what pari-mutuel pricing makes
-   *  available, in total, to whoever ends the cycle still an active
-   *  claimant on the winning bulb. */
+  /** eliminatedPool - standardCut: the total pool money the cycle ever
+   *  made available to surviving players (cash-outs and final win
+   *  combined). Total claims can never exceed this — see PoolLedger. */
   distributablePool: number;
-  /** Sum actually paid to still-active winners at cycle end (0 when
-   *  everyone who staked on the winning bulb had already cashed out). */
+  /** Pool money actually paid to still-active winners at cycle end —
+   *  their returned stakes excluded (a player's own stake is never pool
+   *  money). 0 when everyone on the winning bulb had already cashed out. */
   claimedByWinners: number;
-  /** distributablePool - claimedByWinners: the portion with no remaining
-   *  claimant because every eligible bettor already cashed out earlier in
-   *  the cycle. Stays with the house. Zero when nobody on the winning bulb
-   *  cashed out early. */
+  /** distributablePool minus EVERYTHING claimed from the pool (mid-cycle
+   *  cash-outs + claimedByWinners): the portion with no remaining claimant.
+   *  Stays with the house. */
   unclaimedPool: number;
-  /** standardCut + unclaimedPool — the cycle's full house take. Equal to
-   *  the standard edge only when nobody cashed out early; strictly larger
-   *  whenever some winning-bulb stake went unclaimed. */
+  /** standardCut + unclaimedPool — the cycle's full house take. Never
+   *  negative: claims only ever come out of the depleting shared pool. */
   totalHouseTake: number;
 }
 

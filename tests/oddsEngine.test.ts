@@ -27,10 +27,13 @@
  *     house on top of the standard cut.
  *  8. The cash-out-behavior RTP harness (runCashOutBehaviorSimulation()):
  *     reports a full house-take DISTRIBUTION (min/max/median/average), not
- *     one average — including a deliberately-pinned test documenting that
- *     house take can go negative once cash-outs land on multiple different
- *     still-alive bulbs (not just the eventual winner), since every alive
- *     bulb prices independently off the same distributable pool.
+ *     one average — and proves the shared-pool invariant at scale: total
+ *     pool payouts (all cash-outs + the final win) never exceed 95% of the
+ *     cycle's effective eliminated stakes, so house take can never go
+ *     negative, under every behavior pattern and bulb count. (This replaces
+ *     the old pinned test that documented the pre-PoolLedger double-payout
+ *     bug, where every alive bulb priced independently off a full copy of
+ *     the same pool and the minimum house take could go negative.)
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -39,16 +42,19 @@ import { BulbGameEngine } from '../src/BulbGameEngine';
 import { CHECKPOINTS_BY_BULB_COUNT } from '../src/checkpoints';
 import type { Clock, TimerHandle } from '../src/clock';
 import { DEFAULT_ODDS_CONFIG } from '../src/odds/config';
-import { computeCoefficient, computeCoefficients, computeHouseTake } from '../src/odds/parimutuel';
+import { PoolLedger, computeCoefficient, computeHouseTake } from '../src/odds/parimutuel';
 import { planCycleOutcome } from '../src/odds/outcomePlan';
 import { PariMutuelEngine } from '../src/odds/PariMutuelEngine';
 import {
+  ALL_CASHOUT_BEHAVIORS,
   ALL_SCENARIOS,
   alwaysCashOutBehavior,
   evenSpreadScenario,
   neverCashOutBehavior,
   runCashOutBehaviorSimulation,
   runPariMutuelSimulation,
+  simulateCycleWithCashOuts,
+  tenPlayersScenario,
 } from '../src/odds/rtpSimulation';
 import { DefaultRandomSource, type RandomSource } from '../src/rng';
 import type { Bulb, Player } from '../src/types';
@@ -80,35 +86,85 @@ function bulb(id: string, status: Bulb['status'] = 'alive'): Bulb {
 // 1. Coefficient formula — exact, no RNG
 // -------------------------------------------------------------------------
 
-test('computeCoefficient: 1 + distributablePool / stakeOnBulb, house cut applied only to the eliminated pool', () => {
-  // 100 staked on the losing pool, 5% house cut -> 95 distributable, split
-  // over a bulb with 50 staked on it: 1 + 95/50 = 2.9
-  const coeff = computeCoefficient(50, 100, 0.05);
+test('computeCoefficient: 1 + bulbPoolShare / activeStakeOnBulb', () => {
+  // A bulb reserved a 95 pool share with 50 active stake: 1 + 95/50 = 2.9
+  const coeff = computeCoefficient(50, 95);
   assert.ok(Math.abs(coeff! - 2.9) < 1e-9, `expected 2.9, got ${coeff}`);
 });
 
-test('computeCoefficient: zero eliminated pool (round 1, nothing popped yet) gives exactly 1.0', () => {
-  const coeff = computeCoefficient(50, 0, 0.05);
+test('computeCoefficient: zero pool share (round 1, nothing popped yet) gives exactly 1.0', () => {
+  const coeff = computeCoefficient(50, 0);
   assert.equal(coeff, 1);
 });
 
 test('computeCoefficient: undefined (not 0, not a fallback) when nobody staked on the bulb', () => {
-  assert.equal(computeCoefficient(0, 500, 0.05), undefined);
+  assert.equal(computeCoefficient(0, 500), undefined);
 });
 
-test('computeCoefficients: only alive AND staked bulbs get an entry — popped or unstaked bulbs are omitted', () => {
+test('PoolLedger.coefficients: only alive AND actively-staked bulbs get an entry — popped, unstaked, or fully-cashed-out bulbs are omitted', () => {
   const bulbs = [bulb('bulb_1', 'popped'), bulb('bulb_2'), bulb('bulb_3')];
   const players = [player('p1', 'bulb_1', 10, 'popped'), player('p2', 'bulb_2', 20)];
   // bulb_3 is alive but nobody staked on it; bulb_1 is popped (its stake IS
   // part of the eliminated pool, but it can't itself receive a live entry).
-  const coefficients = computeCoefficients(bulbs, players, 0.05);
+  const ledger = new PoolLedger(0.05);
+  ledger.recordElimination(10); // bulb_1's active stake entered the pool
+  const coefficients = ledger.coefficients(bulbs, players);
 
   assert.equal(coefficients.size, 1);
   assert.ok(coefficients.has('bulb_2'));
   assert.ok(!coefficients.has('bulb_1'));
   assert.ok(!coefficients.has('bulb_3'));
-  // distributablePool = 0.95 * 10 = 9.5; coefficient = 1 + 9.5/20 = 1.475
+  // remainingPool = 0.95 * 10 = 9.5; bulb_2 is the ONLY alive staked bulb
+  // (N = 1), so it gets the whole share: coefficient = 1 + 9.5/20 = 1.475
   assert.ok(Math.abs(coefficients.get('bulb_2')! - 1.475) < 1e-9);
+});
+
+test('PoolLedger.coefficients: N alive staked bulbs split the pool into equal per-bulb shares, so total possible claims never exceed the pool', () => {
+  const bulbs = [bulb('bulb_1', 'popped'), bulb('bulb_2'), bulb('bulb_3'), bulb('bulb_4')];
+  const players = [
+    player('p1', 'bulb_1', 100, 'popped'),
+    player('p2', 'bulb_2', 10),
+    player('p3', 'bulb_3', 40),
+  ];
+  const ledger = new PoolLedger(0.05);
+  ledger.recordElimination(100); // remainingPool = 95
+
+  // Two alive staked bulbs -> each is reserved 95/2 = 47.5:
+  //   bulb_2 (stake 10): 1 + 47.5/10 = 5.75 — small stake, big multiple
+  //   bulb_3 (stake 40): 1 + 47.5/40 = 2.1875
+  const coefficients = ledger.coefficients(bulbs, players);
+  assert.ok(Math.abs(coefficients.get('bulb_2')! - 5.75) < 1e-9);
+  assert.ok(Math.abs(coefficients.get('bulb_3')! - 2.1875) < 1e-9);
+
+  // The invariant in miniature: if EVERY active player cashes out at these
+  // prices, the pool is drained to exactly zero — never overdrawn.
+  const paidP2 = ledger.claim(10, coefficients.get('bulb_2')!);
+  const paidP3 = ledger.claim(40, coefficients.get('bulb_3')!);
+  assert.ok(Math.abs(paidP2 - 57.5) < 1e-9);
+  assert.ok(Math.abs(paidP3 - 87.5) < 1e-9);
+  assert.ok(Math.abs(ledger.remainingPool) < 1e-9, `pool should be exactly drained, got ${ledger.remainingPool}`);
+});
+
+test('PoolLedger.claim: depletes the shared pool, so a later window reprices against what actually remains', () => {
+  const bulbs = [bulb('bulb_1', 'popped'), bulb('bulb_2'), bulb('bulb_3')];
+  const players = [
+    player('p1', 'bulb_1', 100, 'popped'),
+    player('p2', 'bulb_2', 10),
+    player('p3', 'bulb_3', 40),
+  ];
+  const ledger = new PoolLedger(0.05);
+  ledger.recordElimination(100); // remainingPool = 95
+
+  // p2 cashes out at the two-bulb price (share 47.5): claims 47.5.
+  const coefficients = ledger.coefficients(bulbs, players);
+  ledger.claim(10, coefficients.get('bulb_2')!);
+  players[1] = player('p2', 'bulb_2', 10, 'cashed_out');
+  assert.ok(Math.abs(ledger.remainingPool - 47.5) < 1e-9);
+
+  // bulb_3 is now the only alive staked bulb — it prices against the
+  // DEPLETED 47.5, not a fresh copy of 95. This is the bug fix.
+  const repriced = ledger.coefficients(bulbs, players);
+  assert.ok(Math.abs(repriced.get('bulb_3')! - (1 + 47.5 / 40)) < 1e-9);
 });
 
 // -------------------------------------------------------------------------
@@ -519,7 +575,7 @@ test('BulbGameEngine: nobody cashes out -> houseTake.unclaimedPool is ~0, claime
   );
 });
 
-test('BulbGameEngine: the winning bulb\'s only bettor cashes out at the first opportunity -> the entire distributable pool goes unclaimed', () => {
+test('BulbGameEngine: the winning bulb\'s only bettor cashes out at the first opportunity -> everything they didn\'t claim mid-cycle goes unclaimed to the house', () => {
   const engine = new BulbGameEngine({ clock: manualClock, oddsProvider: new PariMutuelEngine(undefined, seededRng(17)) });
   engine.startCycle(5);
   for (let i = 1; i <= 5; i++) engine.placeBet(`p${i}`, `bulb_${i}`, 10);
@@ -559,13 +615,19 @@ test('BulbGameEngine: the winning bulb\'s only bettor cashes out at the first op
 
   const houseTake = engine.getAuditRecord()!.houseTake!;
   assert.equal(houseTake.claimedByWinners, 0, 'nobody was left active on the winning bulb to claim anything');
+  // The early cash-out DID claim pool money mid-cycle (that's the point of
+  // the depleting ledger) — only what it left behind goes unclaimed, since
+  // everyone else rode their losing bulbs to the end.
+  const cashedOut = finalSnapshot.players.find((p) => p.id === winningPlayerId)!;
+  const claimedEarlier = cashedOut.result!.value - cashedOut.stake;
+  assert.ok(claimedEarlier > 0, 'the early cash-out should have claimed some pool money');
   assert.ok(
-    Math.abs(houseTake.unclaimedPool - houseTake.distributablePool) < 1e-9,
-    'with zero claimed, the ENTIRE distributable pool should be unclaimed',
+    Math.abs(houseTake.unclaimedPool - (houseTake.distributablePool - claimedEarlier)) < 1e-9,
+    'unclaimed = distributable pool minus what the early cash-out already took',
   );
   assert.ok(
-    Math.abs(houseTake.totalHouseTake - houseTake.eliminatedPool) < 1e-9,
-    'with the whole distributable pool unclaimed, total house take should equal the full eliminated pool',
+    Math.abs(houseTake.totalHouseTake - (houseTake.eliminatedPool - claimedEarlier)) < 1e-9,
+    'total house take = eliminated pool minus the one mid-cycle claim',
   );
   assert.ok(
     houseTake.totalHouseTake > houseTake.standardCut,
@@ -589,7 +651,12 @@ test('BulbGameEngine: a cancelled (uncontested) cycle has no houseTake at all', 
 //    cash-out behavior, not just a single average.
 // -------------------------------------------------------------------------
 
-test('runCashOutBehaviorSimulation: "everyone cashes out early" produces a materially larger unclaimed-pool share than "nobody cashes out"', () => {
+// Pre-PoolLedger, "everyone cashes out early" left a huge UNCLAIMED pool
+// (each bulb was priced off its own full copy, and the winning bulb's
+// share was orphaned). Under the shared depleting ledger the same behavior
+// instead DRAINS the pool — survivors claim all of it — and shrinks the
+// effective eliminated pool, since cashed-out stakes never enter it.
+test('runCashOutBehaviorSimulation: "everyone cashes out early" drains the shared pool (no unclaimed remainder) and shrinks the effective eliminated pool versus "nobody cashes out"', () => {
   const behaviorNever = runCashOutBehaviorSimulation({
     bulbCount: 5,
     cycles: 3000,
@@ -610,14 +677,17 @@ test('runCashOutBehaviorSimulation: "everyone cashes out early" produces a mater
     `expected ~no unclaimed pool when nobody cashes out, got ${behaviorNever.unclaimedPoolShareOfVolume}`,
   );
   assert.ok(
-    behaviorAlways.unclaimedPoolShareOfVolume > 0.5,
-    `expected a large unclaimed-pool share once everyone cashes out early, got ${behaviorAlways.unclaimedPoolShareOfVolume}`,
+    behaviorAlways.unclaimedPoolShareOfVolume < 0.01,
+    `expected the pool to be drained (not orphaned) when everyone cashes out early, got ${behaviorAlways.unclaimedPoolShareOfVolume}`,
   );
-  // The flat edge itself is unaffected by cash-out behavior — only the
-  // unclaimed-pool component should move.
+  // Cashed-out stakes leave the game before their bulbs pop, so the flat
+  // cut is levied on a much smaller effective eliminated pool — the house
+  // still always keeps its 5% of what WAS eliminated, just of less volume.
   assert.ok(
-    Math.abs(behaviorNever.standardCutShareOfVolume - behaviorAlways.standardCutShareOfVolume) < 0.01,
+    behaviorAlways.standardCutShareOfVolume < behaviorNever.standardCutShareOfVolume,
+    `expected a smaller flat-cut share under early cash-outs, got always=${behaviorAlways.standardCutShareOfVolume} vs never=${behaviorNever.standardCutShareOfVolume}`,
   );
+  assert.ok(behaviorAlways.aggregateHouseTakePct >= -1e-9, 'house take must never be negative');
 });
 
 test('runCashOutBehaviorSimulation: distribution.min/median/max bracket the average, and never diverge from the aggregate figure', () => {
@@ -636,16 +706,63 @@ test('runCashOutBehaviorSimulation: distribution.min/median/max bracket the aver
   }
 });
 
-test('runCashOutBehaviorSimulation: KNOWN characteristic, not a regression — cash-out windows are offered on every alive bulb every round, so once bettors on DIFFERENT (not just the winning) bulbs cash out at overlapping checkpoints, house take can go negative (pool pays out more than was wagered). This is a real property of the current "decision window after every round, on any alive bulb" design (see checkpoints.ts), surfaced here so it stays visible rather than silently assumed away.', () => {
-  const result = runCashOutBehaviorSimulation({
-    bulbCount: 7,
-    cycles: 3000,
-    scenario: evenSpreadScenario,
-    behavior: alwaysCashOutBehavior,
-    rng: seededRng(202),
-  });
-  assert.ok(
-    result.distribution.min < 0,
-    `expected at least one simulated cycle to show negative house take under this behavior pattern, got min=${result.distribution.min}`,
-  );
+// Replaces the old pinned "house take CAN go negative" test, which
+// documented the pre-PoolLedger double-payout bug (every alive bulb priced
+// against its own full copy of the distributable pool). With the shared
+// depleting ledger that behavior is impossible — asserted here per-cycle,
+// at the same simulation scale, across every behavior pattern, bulb count,
+// and stake scenario the harness knows about.
+test('shared-pool invariant: total pool payouts per cycle (all cash-outs + final win) never exceed 95% of eliminated stakes, and house take is never negative — every behavior, bulb count, and scenario', () => {
+  const EPS = 1e-6;
+  const houseCutRate = DEFAULT_ODDS_CONFIG.houseCutRate;
+  const scenarios = [evenSpreadScenario, tenPlayersScenario];
+  for (const behavior of ALL_CASHOUT_BEHAVIORS) {
+    for (const bulbCount of [5, 7, 10] as const) {
+      for (const scenario of scenarios) {
+        const rng = seededRng(202 + bulbCount);
+        let contested = 0;
+        for (let i = 0; i < 3000; i++) {
+          const stakes = scenario.generateStakes(bulbCount, rng);
+          const sample = simulateCycleWithCashOuts(bulbCount, stakes, rng, DEFAULT_ODDS_CONFIG, behavior);
+          if (!sample) continue; // uncontested — refunded, nothing to assert
+          contested += 1;
+          const label = `${behavior.name} / ${scenario.name} / bulbCount=${bulbCount} / cycle=${i}`;
+          // The hard invariant: pool money paid out across the WHOLE cycle
+          // never exceeds (1 - houseCut) x the effective eliminated stakes.
+          assert.ok(
+            sample.poolPaidOut <= (1 - houseCutRate) * sample.eliminatedPool + EPS,
+            `${label}: pool paid out ${sample.poolPaidOut} > 95% of eliminated pool ${sample.eliminatedPool}`,
+          );
+          // Consequence: house take is bounded below by the flat cut on the
+          // effective eliminated pool — never negative, house never at risk.
+          assert.ok(
+            sample.houseTake >= sample.standardCut - EPS,
+            `${label}: house take ${sample.houseTake} fell below the flat cut ${sample.standardCut}`,
+          );
+          assert.ok(sample.houseTake >= -EPS, `${label}: house take went negative (${sample.houseTake})`);
+        }
+        assert.ok(contested > 1000, `expected mostly contested cycles, got ${contested}`);
+      }
+    }
+  }
+});
+
+// The same invariant read off the aggregate harness, so a future change to
+// runCashOutBehaviorSimulation itself can't drift from the per-cycle check.
+test('runCashOutBehaviorSimulation: minimum per-cycle house take never goes negative under any behavior pattern', () => {
+  for (const behavior of ALL_CASHOUT_BEHAVIORS) {
+    for (const bulbCount of [5, 7, 10] as const) {
+      const result = runCashOutBehaviorSimulation({
+        bulbCount,
+        cycles: 3000,
+        scenario: evenSpreadScenario,
+        behavior,
+        rng: seededRng(202),
+      });
+      assert.ok(
+        result.distribution.min >= -1e-9,
+        `${behavior.name} bulbCount=${bulbCount}: minimum house take went negative (${result.distribution.min})`,
+      );
+    }
+  }
 });
