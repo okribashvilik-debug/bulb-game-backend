@@ -45,7 +45,10 @@ export async function markBettingClosed(cycleDbId: string): Promise<void> {
  *  distinguish how much of a cycle's take came from each. */
 export async function markCycleComplete(
   cycleDbId: string,
-  audit: Pick<CycleAuditRecord, 'finalStakeByBulbId' | 'houseCutRate' | 'roundPoolHistory' | 'houseTake'>,
+  audit: Pick<
+    CycleAuditRecord,
+    'finalStakeByBulbId' | 'houseCutRate' | 'roundPoolHistory' | 'houseTake' | 'completionReason' | 'settledBulbId'
+  >,
 ): Promise<void> {
   const { error } = await supabase
     .from('cycles')
@@ -58,6 +61,14 @@ export async function markCycleComplete(
       standard_house_cut: audit.houseTake?.standardCut ?? null,
       unclaimed_pool: audit.houseTake?.unclaimedPool ?? null,
       total_house_take: audit.houseTake?.totalHouseTake ?? null,
+      completion_reason: audit.completionReason ?? null,
+      // A no-contenders settlement stops early: the bulb the cycle settled
+      // on is a business decision, not the sealed planned winner written at
+      // insert time — overwrite it (or null it, when everyone had cashed
+      // out) so the audit row reflects who was actually paid.
+      ...(audit.completionReason === 'no_contenders'
+        ? { winning_bulb_id: audit.settledBulbId ?? null }
+        : {}),
     })
     .eq('id', cycleDbId);
   if (error) throw error;

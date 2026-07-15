@@ -96,6 +96,14 @@ create table if not exists cycles (
   -- Populated only for status='cancelled' (uncontested round — fewer than
   -- 2 bulbs staked, refunded in full, no round played).
   cancel_reason text,
+  -- Populated for status='complete': how the cycle finished.
+  -- 'sole_survivor' = the sealed elimination order ran its course;
+  -- 'no_contenders' = settled early because at most one alive bulb still
+  -- had active stake (further rounds could not change any payout). For
+  -- 'no_contenders', winning_bulb_id is overwritten with the bulb actually
+  -- settled (or null if everyone had already cashed out) — it may differ
+  -- from the sealed planned winner written at insert time.
+  completion_reason text,
   started_at timestamptz not null default now(),
   betting_closed_at timestamptz,
   ended_at timestamptz
@@ -327,6 +335,12 @@ alter table cycles add column if not exists final_stake_by_bulb jsonb;
 alter table cycles add column if not exists house_cut_rate numeric(5, 4);
 alter table cycles add column if not exists round_pool_history jsonb;
 alter table cycles add column if not exists cancel_reason text;
+
+-- Early "no contenders" settlements (see BulbGameEngine.settleNoContenders):
+-- distinguishes cycles that played to their sealed end ('sole_survivor')
+-- from ones settled early because at most one alive bulb still had active
+-- stake ('no_contenders').
+alter table cycles add column if not exists completion_reason text;
 
 -- Add the "unclaimed pool" house-take breakdown (see computeHouseTake() in
 -- src/odds/parimutuel.ts) — separate columns for the flat 5% edge vs. the

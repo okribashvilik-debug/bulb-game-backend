@@ -4,7 +4,9 @@ import { computeAmbient, type StageBulb } from '../stage';
  * The reactive room behind the bulbs — pure presentation, its only input
  * is the derived stage-bulb list. Renders (bottom → top, per the handoff):
  *
- *   1. the static stage shell: curtain wall, floor, gold horizon at 76%
+ *   1. the static stage shell: curtain wall, floor, gold horizon at the
+ *      --floor-top line (76%, but never less than 110px of floor — see
+ *      styles.css)
  *   2. ambient warm wash — opacity follows the handoff's ambient formula,
  *      so every pop visibly darkens the whole room by that bulb's share
  *   3. win climax wash — the single brightest, warmest frame
@@ -61,7 +63,7 @@ export function RoomLighting({ bulbs }: { bulbs: StageBulb[] }) {
                 left: -Math.round(L.coneW / 2),
                 top: L.coneTop,
                 width: L.coneW,
-                height: `calc(76% - ${L.coneTop}px)`,
+                height: `calc(var(--floor-top) - ${L.coneTop}px)`,
               }}
             />
             <div

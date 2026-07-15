@@ -185,4 +185,22 @@ export interface CycleAuditRecord {
    *  winner (see BulbGameEngine.endCycle). Undefined for a cancelled cycle
    *  (full refund, no house take at all) and before the cycle completes. */
   houseTake?: HouseTakeBreakdown;
+  /** How the cycle actually completed. 'sole_survivor' = the sealed
+   *  elimination order ran its course and one bulb physically remained.
+   *  'no_contenders' = a deliberate early settlement: only one (or zero)
+   *  alive bulbs still had active stake, so further rounds could not have
+   *  changed anyone's payout (an unstaked bulb contributes $0 to the pool)
+   *  — see BulbGameEngine.settleNoContenders. Undefined until the cycle
+   *  completes; undefined forever for a cancelled cycle. */
+  completionReason?: CycleCompletionReason;
+  /** The bulb the cycle actually settled on. Equals winningBulbId for
+   *  'sole_survivor'; for 'no_contenders' it's the last staked-and-alive
+   *  bulb (NOT necessarily the sealed planned winner — the early stop is a
+   *  business decision, not an outcome reveal) or undefined when nobody
+   *  had active stake left at all. */
+  settledBulbId?: string;
 }
+
+/** How a completed (not cancelled) cycle reached cycle_complete — see
+ *  CycleAuditRecord.completionReason. */
+export type CycleCompletionReason = 'sole_survivor' | 'no_contenders';

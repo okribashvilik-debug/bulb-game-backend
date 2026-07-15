@@ -1,4 +1,4 @@
-import type { Bulb, CycleSnapshot, Player } from './types';
+import type { Bulb, CycleCompletionReason, CycleSnapshot, Player } from './types';
 
 /** Event payloads the engine emits. A future UI subscribes to these. */
 export type BulbGameEvents = {
@@ -23,7 +23,13 @@ export type BulbGameEvents = {
   };
   playerCashedOut: { player: Player };
   playerContinued: { playerId: string };
-  cycleComplete: { winningBulbId: string; winners: Player[] };
+  /** `reason` distinguishes a true final-pop win ('sole_survivor') from an
+   *  early no-contenders settlement ('no_contenders' — only one/zero alive
+   *  bulbs still had active stake, so the cycle stopped; the UI should say
+   *  "no other bulbs left in contention — settled early" rather than play
+   *  the normal dramatic final-pop win. `winningBulbId` is '' when nobody
+   *  had any active stake left to settle. */
+  cycleComplete: { winningBulbId: string; winners: Player[]; reason: CycleCompletionReason };
 };
 
 type Listener<T> = (payload: T) => void;

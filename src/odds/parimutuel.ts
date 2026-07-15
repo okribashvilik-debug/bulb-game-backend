@@ -10,22 +10,20 @@
  *   drawn from ONE shared, depleting ledger (PoolLedger below), never from
  *   independent per-bulb copies of the same money.
  *
- * How the 95% is divided (a deliberate game-design decision — see the
- * PoolLedger.coefficients() comment for the full reasoning):
+ * How the 95% is divided (see the PoolLedger.coefficients() comment for
+ * the full reasoning):
  *
- *   - Each ALIVE bulb that still has active (not cashed-out) stake gets an
- *     equal 1/N share of the remaining pool, where N is the number of such
- *     bulbs. Bettors within a bulb split their bulb's share proportional
- *     to stake.
- *   - So for bulb `i`:  live_coefficient_i = 1 + (remainingPool / N) / S_i
- *     where S_i is the ACTIVE stake on bulb i. Different bulbs still carry
- *     different coefficients (small-stake bulbs pay bigger multiples), but
- *     the sum of every bulb's maximum possible claim is exactly the
- *     remaining pool — never more.
- *   - At the final round N = 1, so the winner's coefficient degenerates to
- *     1 + remainingPool / S_winner — the same shape as the historical win
- *     payout formula. Hold-to-resolution economics are unchanged by this
- *     fix; only overlapping mid-cycle cash-outs price differently.
+ *   - Each alive bettor's pool share is proportional to their own ACTIVE
+ *     (not cashed-out) stake:  share_i = remainingPool × S_i / ΣS, where
+ *     ΣS is the total active stake across ALL alive staked bulbs.
+ *   - So live_coefficient_i = 1 + share_i / S_i = 1 + remainingPool / ΣS —
+ *     the SAME value for every alive staked bulb. Dollar payouts still
+ *     scale with stake (payout = stake × coefficient), and the sum of
+ *     every bettor's maximum possible claim is exactly the remaining pool
+ *     — never more.
+ *   - With one alive staked bulb ΣS = S_winner, so the winner's
+ *     coefficient degenerates to 1 + remainingPool / S_winner — the same
+ *     shape as the historical win payout formula.
  *
  * Two further consequences of "the pool is real money, not a formula":
  *
@@ -176,23 +174,24 @@ export class PoolLedger {
    * Live coefficient for every alive bulb with active stake.
    *
    * DESIGN DECISION (how simultaneously-alive bulbs share one pool):
-   * each of the N alive-and-actively-staked bulbs is reserved an equal
-   * 1/N slice of `remainingPool`; a bulb's bettors split their bulb's
-   * slice proportional to stake, giving
+   * each alive bettor's pool share is proportional to their own active
+   * stake — share_i = remaining × S_i/ΣS, where ΣS is the total active
+   * stake across ALL alive staked bulbs — giving every alive staked bulb
+   * the identical coefficient
    *
-   *     c_i = 1 + (remainingPool / N) / activeStake_i
+   *     c = 1 + remaining / ΣS
    *
-   * Why equal-per-bulb rather than proportional-to-stake across all
-   * survivors: proportional-to-stake (share_i = remaining × S_i/ΣS) makes
-   * every alive bulb's coefficient collapse to the identical value
-   * 1 + remaining/ΣS — flattening exactly the per-bulb variety the game
-   * is built on. Equal-per-bulb keeps small-stake bulbs paying visibly
-   * bigger multiples (share is fixed, divisor is smaller) while still
-   * summing every bulb's maximum claim to exactly `remainingPool`, which
-   * is what makes the no-overpayment invariant unconditional: even if
-   * every active player on every alive bulb cashes out in the same
-   * window, total claims = remainingPool, never a dollar more. Within a
-   * bulb, the split IS proportional to stake, per the business rule.
+   * Why proportional-to-stake rather than the old equal-per-bulb split
+   * (1/N slice per bulb): equal-per-bulb handed a $1 bettor the same
+   * dollar-sized pool slice as a $10 bettor, so betting LESS produced a
+   * dramatically higher multiple — an exploit that rewarded splitting
+   * into many tiny bets on thin bulbs. Proportional-to-stake removes
+   * that: every alive player sees the same coefficient, but the dollar
+   * payout (stake × coefficient) still scales with their own stake. The
+   * no-overpayment invariant is preserved unchanged: Σ claims =
+   * ΣS × (remaining/ΣS) = remaining exactly, so even if every active
+   * player on every alive bulb cashes out in the same window, total
+   * claims = remainingPool, never a dollar more.
    */
   coefficients(bulbs: Bulb[], players: Player[]): Map<string, number> {
     const activeStakes = activeStakeByBulbId(players);
@@ -203,11 +202,14 @@ export class PoolLedger {
     const result = new Map<string, number>();
     if (aliveStakedBulbs.length === 0) return result;
 
-    const perBulbShare = this.remaining / aliveStakedBulbs.length;
+    let totalAliveActiveStake = 0;
     for (const bulb of aliveStakedBulbs) {
-      const stake = activeStakes.get(bulb.id)!;
-      const coefficient = computeCoefficient(stake, perBulbShare);
-      if (coefficient !== undefined) result.set(bulb.id, coefficient);
+      totalAliveActiveStake += activeStakes.get(bulb.id)!;
+    }
+
+    const coefficient = computeCoefficient(totalAliveActiveStake, this.remaining)!;
+    for (const bulb of aliveStakedBulbs) {
+      result.set(bulb.id, coefficient);
     }
     return result;
   }

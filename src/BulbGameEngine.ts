@@ -19,6 +19,9 @@
  *                        CHECKPOINTS_BY_BULB_COUNT below)
  *                     \-> decision_window --advanceToNextRound--> round_active
  *     --resolveRound (last alive bulb)--> cycle_complete --startCycle--> betting
+ *     --resolveRound / advanceToNextRound (≤1 alive bulb still has active
+ *       stake)--> cycle_complete early via settleNoContenders() — no more
+ *       rounds once nobody can contest the pool
  *
  *     --finishCalculating (uncontested, <2 bulbs staked)--> cycle_cancelled
  *       (refunded; the caller — GameSession — restarts a fresh cycle)
@@ -42,13 +45,14 @@
 import { isCashOutCheckpoint } from './checkpoints';
 import { defaultClock, type Clock, type TimerHandle } from './clock';
 import { TinyEmitter, type BulbGameEvents } from './events';
-import { totalStakeByBulbId, type PoolLedger } from './odds/parimutuel';
+import { activeStakeByBulbId, totalStakeByBulbId, type PoolLedger } from './odds/parimutuel';
 import { PariMutuelEngine, type OddsProvider } from './odds/PariMutuelEngine';
 import type { CycleOutcomePlan } from './odds/outcomePlan';
 import type {
   Bulb,
   BulbCount,
   CycleAuditRecord,
+  CycleCompletionReason,
   CycleSnapshot,
   CycleTimings,
   GameState,
@@ -123,6 +127,9 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
   /** Set only once endCycle() runs with an actual winner — see
    *  computeHouseTake(). Undefined for a cancelled cycle (full refund). */
   private houseTake: HouseTakeBreakdown | undefined;
+  /** How the cycle completed — set once by endCycle(). See
+   *  CycleCompletionReason in types.ts. */
+  private completionReason: CycleCompletionReason | undefined;
 
   /** Player ids that have made an explicit decision (cash out or continue)
    *  in the current decision window — lets that window end the instant
@@ -216,6 +223,8 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
       roundPoolHistory: this.roundPoolHistory.map((r) => ({ ...r })),
       cancelled: this.cancelledInfo,
       houseTake: this.houseTake ? { ...this.houseTake } : undefined,
+      completionReason: this.completionReason,
+      settledBulbId: this.completionReason ? this.winningBulbId : undefined,
     };
   }
 
@@ -264,6 +273,7 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     this.roundPoolHistory = [];
     this.cancelledInfo = undefined;
     this.houseTake = undefined;
+    this.completionReason = undefined;
     this.decidedPlayerIds.clear();
     this.poolLedger = this.oddsProvider.createLedger();
     this.frozenWindowCoefficients = undefined;
@@ -414,6 +424,15 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
       return;
     }
 
+    // No-contenders check — BEFORE any decision-window logic, so a
+    // checkpoint never opens a window when there's nothing left to decide
+    // about. Physically-alive bulbs aren't enough to keep playing: an
+    // unstaked bulb popping contributes $0 to the pool (recordElimination
+    // sums active stakes), so once at most one alive bulb still has active
+    // money on it, no further round can change anyone's coefficient — the
+    // remaining bettors would carry real pop risk for zero possible upside.
+    if (this.settleIfNoContenders(stillAlive)) return;
+
     // Only open a decision window on a configured checkpoint round for
     // this bulb-count mode — every other round pops straight into the
     // next one, with no cash-out opportunity offered at all.
@@ -543,15 +562,51 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
    *  for anyone who didn't act). */
   advanceToNextRound(): void {
     if (this.state !== 'decision_window') return; // stale timer or duplicate call
+    // Cash-outs in the window just closed may have drained the last
+    // competing bulb's stake — same no-contenders rule as after a pop, so
+    // the cycle ends here instead of running rounds nobody has money on.
+    const stillAlive = this.bulbs.filter((b) => b.status === 'alive');
+    if (this.settleIfNoContenders(stillAlive)) return;
     this.beginRound(this.currentRound + 1);
+  }
+
+  /** If at most one of `stillAlive` still has active stake, settles the
+   *  cycle early (see settleNoContenders) and returns true. */
+  private settleIfNoContenders(stillAlive: Bulb[]): boolean {
+    const activeStakes = activeStakeByBulbId(this.players);
+    const stillAliveWithStake = stillAlive.filter((b) => (activeStakes.get(b.id) ?? 0) > 0);
+    if (stillAliveWithStake.length > 1) return false;
+    this.settleNoContenders(stillAliveWithStake[0]?.id);
+    return true;
+  }
+
+  /** Early "no contenders left" settlement: either exactly one alive bulb
+   *  still has active stake (its bettors are paid out now, at the same
+   *  live pari-mutuel coefficient a normal win would use) or zero do
+   *  (everyone cashed out — nothing left to pay, the cycle just ends).
+   *  This is a deliberate business decision to stop the round, NOT a
+   *  reveal of the sealed outcome — the settled bulb may well differ from
+   *  the planned winner, which is why endCycle's sole-survivor assertion
+   *  is explicitly skipped for this path. */
+  private settleNoContenders(remainingStakedBulbId: string | undefined): void {
+    this.endCycle(remainingStakedBulbId, 'no_contenders');
   }
 
   // ---------------------------------------------------------------------
   // Cycle end
   // ---------------------------------------------------------------------
 
-  private endCycle(winningBulbId: string | undefined): void {
-    if (winningBulbId !== undefined && winningBulbId !== this.outcome?.winningBulbId) {
+  private endCycle(
+    winningBulbId: string | undefined,
+    reason: CycleCompletionReason = 'sole_survivor',
+  ): void {
+    // The sealed-outcome assertion applies ONLY to a true sole-physical-
+    // survivor ending, where the elimination order actually ran its course.
+    // A 'no_contenders' settlement stops the cycle early on purpose — the
+    // settled bulb is simply the last one with money on it and makes no
+    // claim to being the planned winner, so checking it against the sealed
+    // outcome would be a false alarm. Do not "fix" this by asserting there.
+    if (reason === 'sole_survivor' && winningBulbId !== undefined && winningBulbId !== this.outcome?.winningBulbId) {
       // The sole survivor must always be the bulb decided in startCycle();
       // anything else means the elimination order and round count desynced.
       throw new Error(
@@ -560,6 +615,7 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
       );
     }
 
+    this.completionReason = reason;
     this.winningBulbId = winningBulbId;
     this.transitionTo('cycle_complete');
     this.emitStateChange();
@@ -599,16 +655,15 @@ export class BulbGameEngine extends TinyEmitter<BulbGameEvents> {
     // A cash-out is final (see PlayerStatus) — anyone who left the winning
     // bulb early has no further claim, so whatever the ledger still holds
     // after the winners' claims has no claimant and stays with the house
-    // on top of the flat per-round cut. Undefined winningBulbId (the
-    // uncontested/cancelled path never reaches endCycle) shouldn't occur
-    // here, but this stays defensive rather than assuming.
-    if (winningBulbId !== undefined) {
-      this.houseTake = this.poolLedger!.houseTakeBreakdown(claimedByWinners);
-    }
+    // on top of the flat per-round cut. Computed even when winningBulbId
+    // is undefined (a zero-contenders settlement: everyone cashed out, so
+    // the entire remaining pool is unclaimed house take).
+    this.houseTake = this.poolLedger!.houseTakeBreakdown(claimedByWinners);
 
     this.emit('cycleComplete', {
       winningBulbId: winningBulbId ?? '',
       winners: winners.map((p) => ({ ...p })),
+      reason,
     });
   }
 

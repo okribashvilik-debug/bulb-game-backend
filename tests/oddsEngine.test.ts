@@ -43,8 +43,9 @@ import { CHECKPOINTS_BY_BULB_COUNT } from '../src/checkpoints';
 import type { Clock, TimerHandle } from '../src/clock';
 import { DEFAULT_ODDS_CONFIG } from '../src/odds/config';
 import { PoolLedger, computeCoefficient, computeHouseTake } from '../src/odds/parimutuel';
+import type { BulbGameEvents } from '../src/events';
 import { planCycleOutcome } from '../src/odds/outcomePlan';
-import { PariMutuelEngine } from '../src/odds/PariMutuelEngine';
+import { PariMutuelEngine, type OddsProvider } from '../src/odds/PariMutuelEngine';
 import {
   ALL_CASHOUT_BEHAVIORS,
   ALL_SCENARIOS,
@@ -119,7 +120,7 @@ test('PoolLedger.coefficients: only alive AND actively-staked bulbs get an entry
   assert.ok(Math.abs(coefficients.get('bulb_2')! - 1.475) < 1e-9);
 });
 
-test('PoolLedger.coefficients: N alive staked bulbs split the pool into equal per-bulb shares, so total possible claims never exceed the pool', () => {
+test('PoolLedger.coefficients: alive bulbs with very different stakes share ONE coefficient, so payouts scale with stake and total possible claims never exceed the pool', () => {
   const bulbs = [bulb('bulb_1', 'popped'), bulb('bulb_2'), bulb('bulb_3'), bulb('bulb_4')];
   const players = [
     player('p1', 'bulb_1', 100, 'popped'),
@@ -129,19 +130,19 @@ test('PoolLedger.coefficients: N alive staked bulbs split the pool into equal pe
   const ledger = new PoolLedger(0.05);
   ledger.recordElimination(100); // remainingPool = 95
 
-  // Two alive staked bulbs -> each is reserved 95/2 = 47.5:
-  //   bulb_2 (stake 10): 1 + 47.5/10 = 5.75 — small stake, big multiple
-  //   bulb_3 (stake 40): 1 + 47.5/40 = 2.1875
+  // Total alive active stake = 10 + 40 = 50 -> shared coefficient
+  // 1 + 95/50 = 2.9 for BOTH bulbs — no small-stake multiplier exploit.
   const coefficients = ledger.coefficients(bulbs, players);
-  assert.ok(Math.abs(coefficients.get('bulb_2')! - 5.75) < 1e-9);
-  assert.ok(Math.abs(coefficients.get('bulb_3')! - 2.1875) < 1e-9);
+  assert.ok(Math.abs(coefficients.get('bulb_2')! - 2.9) < 1e-9);
+  assert.ok(Math.abs(coefficients.get('bulb_3')! - 2.9) < 1e-9);
 
   // The invariant in miniature: if EVERY active player cashes out at these
-  // prices, the pool is drained to exactly zero — never overdrawn.
+  // prices, the pool is drained to exactly zero — never overdrawn — and
+  // payouts are stake-proportional (the 40 bettor takes 4× the 10 bettor).
   const paidP2 = ledger.claim(10, coefficients.get('bulb_2')!);
   const paidP3 = ledger.claim(40, coefficients.get('bulb_3')!);
-  assert.ok(Math.abs(paidP2 - 57.5) < 1e-9);
-  assert.ok(Math.abs(paidP3 - 87.5) < 1e-9);
+  assert.ok(Math.abs(paidP2 - 29) < 1e-9);
+  assert.ok(Math.abs(paidP3 - 116) < 1e-9);
   assert.ok(Math.abs(ledger.remainingPool) < 1e-9, `pool should be exactly drained, got ${ledger.remainingPool}`);
 });
 
@@ -155,16 +156,16 @@ test('PoolLedger.claim: depletes the shared pool, so a later window reprices aga
   const ledger = new PoolLedger(0.05);
   ledger.recordElimination(100); // remainingPool = 95
 
-  // p2 cashes out at the two-bulb price (share 47.5): claims 47.5.
+  // p2 cashes out at the shared price 1 + 95/50 = 2.9: claims 10×1.9 = 19.
   const coefficients = ledger.coefficients(bulbs, players);
   ledger.claim(10, coefficients.get('bulb_2')!);
   players[1] = player('p2', 'bulb_2', 10, 'cashed_out');
-  assert.ok(Math.abs(ledger.remainingPool - 47.5) < 1e-9);
+  assert.ok(Math.abs(ledger.remainingPool - 76) < 1e-9);
 
   // bulb_3 is now the only alive staked bulb — it prices against the
-  // DEPLETED 47.5, not a fresh copy of 95. This is the bug fix.
+  // DEPLETED 76, not a fresh copy of 95. This is the bug fix.
   const repriced = ledger.coefficients(bulbs, players);
-  assert.ok(Math.abs(repriced.get('bulb_3')! - (1 + 47.5 / 40)) < 1e-9);
+  assert.ok(Math.abs(repriced.get('bulb_3')! - (1 + 76 / 40)) < 1e-9);
 });
 
 // -------------------------------------------------------------------------
@@ -575,7 +576,7 @@ test('BulbGameEngine: nobody cashes out -> houseTake.unclaimedPool is ~0, claime
   );
 });
 
-test('BulbGameEngine: the winning bulb\'s only bettor cashes out at the first opportunity -> everything they didn\'t claim mid-cycle goes unclaimed to the house', () => {
+test('BulbGameEngine: the winning bulb\'s only bettor cashes out at the first opportunity -> the last remaining staked bettor is settled early as no_contenders and drains the pool', () => {
   const engine = new BulbGameEngine({ clock: manualClock, oddsProvider: new PariMutuelEngine(undefined, seededRng(17)) });
   engine.startCycle(5);
   for (let i = 1; i <= 5; i++) engine.placeBet(`p${i}`, `bulb_${i}`, 10);
@@ -613,25 +614,36 @@ test('BulbGameEngine: the winning bulb\'s only bettor cashes out at the first op
     'a cashed-out player must not flip to "won" later, even though their bulb ended up winning',
   );
 
-  const houseTake = engine.getAuditRecord()!.houseTake!;
-  assert.equal(houseTake.claimedByWinners, 0, 'nobody was left active on the winning bulb to claim anything');
-  // The early cash-out DID claim pool money mid-cycle (that's the point of
-  // the depleting ledger) — only what it left behind goes unclaimed, since
-  // everyone else rode their losing bulbs to the end.
+  // With the sealed winner's bulb left unstaked by the cash-out, the other
+  // staked bulbs pop one by one until only ONE staked bulb remains — at
+  // that point the no-contenders rule settles the cycle early: that last
+  // bettor is paid the full remaining pool (coefficient 1 + remaining/stake
+  // drains it exactly), so nothing goes unclaimed anymore. Pre-fix, this
+  // bettor's bulb would have popped on schedule and the whole remainder
+  // stayed with the house — the unclaimed-pool outcome this test used to
+  // pin. That outcome is now impossible by design.
+  const audit = engine.getAuditRecord()!;
+  assert.equal(audit.completionReason, 'no_contenders');
+  const settledWinner = finalSnapshot.players.find((p) => p.status === 'won')!;
+  assert.ok(settledWinner, 'the last staked bettor must have been settled as a winner');
+  assert.notEqual(settledWinner.id, winningPlayerId);
+
+  const houseTake = audit.houseTake!;
+  assert.ok(houseTake.claimedByWinners > 0, 'the early-settled bettor claimed the remaining pool');
   const cashedOut = finalSnapshot.players.find((p) => p.id === winningPlayerId)!;
   const claimedEarlier = cashedOut.result!.value - cashedOut.stake;
   assert.ok(claimedEarlier > 0, 'the early cash-out should have claimed some pool money');
   assert.ok(
-    Math.abs(houseTake.unclaimedPool - (houseTake.distributablePool - claimedEarlier)) < 1e-9,
-    'unclaimed = distributable pool minus what the early cash-out already took',
+    Math.abs(houseTake.unclaimedPool) < 1e-9,
+    'the early settlement drains the pool — nothing left unclaimed',
   );
   assert.ok(
-    Math.abs(houseTake.totalHouseTake - (houseTake.eliminatedPool - claimedEarlier)) < 1e-9,
-    'total house take = eliminated pool minus the one mid-cycle claim',
+    Math.abs(houseTake.totalHouseTake - houseTake.standardCut) < 1e-9,
+    'house take collapses to just the flat 5% edge',
   );
   assert.ok(
-    houseTake.totalHouseTake > houseTake.standardCut,
-    'total take must exceed the flat 5% edge once something goes unclaimed',
+    Math.abs(claimedEarlier + houseTake.claimedByWinners - houseTake.distributablePool) < 1e-9,
+    'cash-out claim + settlement claim account for the whole distributable pool',
   );
 });
 
@@ -765,4 +777,154 @@ test('runCashOutBehaviorSimulation: minimum per-cycle house take never goes nega
       );
     }
   }
+});
+
+// -------------------------------------------------------------------------
+// 9. Early "no contenders" settlement — once at most one alive bulb still
+//    has active stake, further rounds can't change any payout (unstaked
+//    pops contribute $0 to the pool), so the cycle ends right there.
+// -------------------------------------------------------------------------
+
+/** OddsProvider with a fixed, known outcome — so tests can force the exact
+ *  pop order the no-contenders scenarios need. */
+function scriptedProvider(winningBulbId: string, eliminationOrder: string[]): OddsProvider {
+  return {
+    houseCutRate: 0.05,
+    planOutcome: () => ({ winningBulbId, eliminationOrder }),
+    createLedger: () => new PoolLedger(0.05),
+  };
+}
+
+test('settleNoContenders: cycle ends the moment only one staked bulb is left alive — paid at the live coefficient, no sealed-winner assertion', () => {
+  // 5 bulbs, stakes on bulb_1..bulb_3 only. The sealed plan pops the three
+  // staked bulbs first and crowns UNSTAKED bulb_5 the winner — so if the
+  // cycle wrongly ran to the end, bulb_3 would pop in round 3 and p3 would
+  // lose despite being the only bettor left with anything at risk.
+  const engine = new BulbGameEngine({
+    clock: manualClock,
+    oddsProvider: scriptedProvider('bulb_5', ['bulb_1', 'bulb_2', 'bulb_3', 'bulb_4']),
+  });
+  const completions: BulbGameEvents['cycleComplete'][] = [];
+  engine.on('cycleComplete', (payload) => completions.push(payload));
+
+  engine.startCycle(5);
+  engine.placeBet('p1', 'bulb_1', 10);
+  engine.placeBet('p2', 'bulb_2', 10);
+  engine.placeBet('p3', 'bulb_3', 10);
+  engine.closeBetting();
+  engine.finishCalculating();
+
+  engine.resolveRound(); // round 1: bulb_1 pops -> 4 alive, checkpoint window
+  assert.equal(engine.getState(), 'decision_window');
+  for (const p of engine.getSnapshot().players.filter((p) => p.status === 'active')) {
+    engine.continuePlaying(p.id);
+  }
+
+  // Round 2: bulb_2 pops. bulb_3 is now the ONLY alive bulb with active
+  // stake (bulb_4/bulb_5 are alive but were never bet on) — the cycle must
+  // end HERE, without opening the 3-alive checkpoint window and without
+  // tripping the sole-survivor-vs-planned-winner assertion (bulb_3 is NOT
+  // the sealed winner, and that's fine — this is a business stop, not a
+  // reveal).
+  engine.resolveRound();
+  assert.equal(engine.getState(), 'cycle_complete');
+  assert.equal(engine.getSnapshot().currentRound, 2, 'no round 3+ was played');
+
+  const p3 = engine.getSnapshot().players.find((p) => p.id === 'p3')!;
+  assert.equal(p3.status, 'won');
+  // Pool: 20 eliminated -> 19 distributable; p3 is the only active stake
+  // (10), so the live coefficient is 1 + 19/10 = 2.9 -> payout 29.
+  assert.ok(Math.abs(p3.result!.value - 29) < 1e-9, `expected 29, got ${p3.result!.value}`);
+
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0].reason, 'no_contenders');
+  assert.equal(completions[0].winningBulbId, 'bulb_3');
+
+  // Unstaked survivors stay 'alive' — never contested, never revealed.
+  const aliveLeft = engine.getSnapshot().bulbs.filter((b) => b.status === 'alive').map((b) => b.id);
+  assert.deepEqual(aliveLeft.sort(), ['bulb_3', 'bulb_4', 'bulb_5']);
+
+  const audit = engine.getAuditRecord()!;
+  assert.equal(audit.completionReason, 'no_contenders');
+  assert.equal(audit.settledBulbId, 'bulb_3');
+  assert.equal(audit.winningBulbId, 'bulb_5', 'the sealed planned winner stays on record, unchanged');
+});
+
+test('settleNoContenders: zero staked bulbs left (last bettor cashed out) -> cycle ends immediately with no winner payout', () => {
+  // Sealed plan pops bulb_3 first; p1 and p2 (the only other bettors) then
+  // BOTH cash out in the 4-alive decision window, leaving ZERO alive bulbs
+  // with active stake while 4 bulbs are still physically alive.
+  const engine = new BulbGameEngine({
+    clock: manualClock,
+    oddsProvider: scriptedProvider('bulb_5', ['bulb_3', 'bulb_1', 'bulb_2', 'bulb_4']),
+  });
+  const completions: BulbGameEvents['cycleComplete'][] = [];
+  engine.on('cycleComplete', (payload) => completions.push(payload));
+
+  engine.startCycle(5);
+  engine.placeBet('p1', 'bulb_1', 10);
+  engine.placeBet('p2', 'bulb_2', 10);
+  engine.placeBet('p3', 'bulb_3', 10);
+  engine.closeBetting();
+  engine.finishCalculating();
+
+  engine.resolveRound(); // round 1: bulb_3 pops -> checkpoint window opens
+  assert.equal(engine.getState(), 'decision_window');
+  engine.cashOut('p1');
+  engine.cashOut('p2'); // last decider -> window resolves at once
+
+  // The cash-outs drained every competing stake — no round 2 runs.
+  assert.equal(engine.getState(), 'cycle_complete');
+  assert.equal(engine.getSnapshot().currentRound, 1, 'no further rounds were played');
+  assert.equal(engine.getSnapshot().winningBulbId, undefined);
+  assert.equal(engine.getSnapshot().players.filter((p) => p.status === 'won').length, 0);
+
+  // Both were paid the frozen window coefficient 1 + 9.5/20 = 1.475 ->
+  // 14.75 each, draining the pool exactly; nothing else is paid at
+  // settlement.
+  for (const id of ['p1', 'p2']) {
+    const paid = engine.getSnapshot().players.find((p) => p.id === id)!;
+    assert.equal(paid.status, 'cashed_out');
+    assert.ok(Math.abs(paid.result!.value - 14.75) < 1e-9, `${id} paid ${paid.result!.value}`);
+  }
+
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0].reason, 'no_contenders');
+  assert.equal(completions[0].winningBulbId, '');
+  assert.deepEqual(completions[0].winners, []);
+
+  const audit = engine.getAuditRecord()!;
+  assert.equal(audit.completionReason, 'no_contenders');
+  assert.equal(audit.settledBulbId, undefined);
+  // House take is still recorded: flat 5% of the 10 eliminated, and the
+  // pool was fully claimed by the cash-out, so nothing goes unclaimed.
+  assert.ok(Math.abs(audit.houseTake!.standardCut - 0.5) < 1e-9);
+  assert.ok(Math.abs(audit.houseTake!.unclaimedPool) < 1e-9);
+});
+
+test('settleNoContenders: a normal fully-staked cycle is untouched — completes as sole_survivor with the sealed winner', () => {
+  const engine = new BulbGameEngine({ clock: manualClock, oddsProvider: new PariMutuelEngine(undefined, seededRng(77)) });
+  const completions: BulbGameEvents['cycleComplete'][] = [];
+  engine.on('cycleComplete', (payload) => completions.push(payload));
+
+  engine.startCycle(5);
+  for (let i = 1; i <= 5; i++) engine.placeBet(`p${i}`, `bulb_${i}`, 10);
+  engine.closeBetting();
+  engine.finishCalculating();
+
+  let round = 0;
+  while (engine.getState() !== 'cycle_complete') {
+    engine.resolveRound();
+    round += 1;
+    if (engine.getState() === 'decision_window') {
+      for (const p of engine.getSnapshot().players.filter((p) => p.status === 'active')) {
+        engine.continuePlaying(p.id);
+      }
+    }
+    assert.ok(round < 20, 'safety valve');
+  }
+
+  assert.equal(completions[0].reason, 'sole_survivor');
+  assert.equal(completions[0].winningBulbId, engine.getAuditRecord()!.winningBulbId);
+  assert.equal(engine.getAuditRecord()!.completionReason, 'sole_survivor');
 });

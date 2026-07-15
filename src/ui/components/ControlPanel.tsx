@@ -8,7 +8,8 @@ import { PolicyModal } from './PolicyModal';
 import type { BulbCount } from '../../types';
 
 const QUICK_AMOUNTS = [1, 2, 5, 10] as const;
-const STAKE_STEP = 1;
+const STAKE_STEP = 0.1;
+const MIN_STAKE = 0.5;
 // Vertical selector, largest on top per the panel design.
 const BULB_COUNT_OPTIONS: BulbCount[] = [10, 7, 5];
 
@@ -34,7 +35,11 @@ export function ControlPanel() {
   const humanPlayer = snapshot.players.find((p) => p.id === myPlayerId);
   const alreadyBet = humanPlayer !== undefined;
 
-  const clampStake = (value: number) => Math.max(1, Math.min(Math.floor(balance) || 1, Math.floor(value)));
+  // Round to cents first so repeated ±0.10 steps can't accumulate float drift.
+  const clampStake = (value: number) => {
+    const cents = Math.round(value * 100) / 100;
+    return Math.max(MIN_STAKE, Math.min(Math.max(balance, MIN_STAKE), cents));
+  };
 
   const canBet = bettingOpen && !alreadyBet && selectedBulbId !== null && stake > 0 && stake <= balance;
 
@@ -58,7 +63,6 @@ export function ControlPanel() {
         <div className="stake-control__row">
           <button
             className="chip-btn stake-control__step"
-            disabled={!bettingOpen || alreadyBet}
             onClick={() => setStake(clampStake(stake - STAKE_STEP))}
           >
             −
@@ -66,14 +70,13 @@ export function ControlPanel() {
           <input
             className="stake-control__input"
             type="number"
-            min={1}
+            min={0.5}
+            step={0.1}
             value={stake}
-            disabled={!bettingOpen || alreadyBet}
-            onChange={(e) => setStake(clampStake(Number(e.target.value) || 1))}
+            onChange={(e) => setStake(clampStake(Number(e.target.value) || MIN_STAKE))}
           />
           <button
             className="chip-btn stake-control__step"
-            disabled={!bettingOpen || alreadyBet}
             onClick={() => setStake(clampStake(stake + STAKE_STEP))}
           >
             +
@@ -84,13 +87,12 @@ export function ControlPanel() {
             <button
               key={amount}
               className="chip-btn"
-              disabled={!bettingOpen || alreadyBet}
               onClick={() => setStake(clampStake(amount))}
             >
               {amount}
             </button>
           ))}
-          <button className="chip-btn" disabled={!bettingOpen || alreadyBet} onClick={() => setStake(clampStake(balance))}>
+          <button className="chip-btn" onClick={() => setStake(clampStake(balance))}>
             All In
           </button>
         </div>

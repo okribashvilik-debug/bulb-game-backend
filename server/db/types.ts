@@ -47,6 +47,10 @@ export interface CycleRow {
   total_house_take: number | null;
   /** Populated only for status='cancelled' (uncontested round, refunded). */
   cancel_reason: string | null;
+  /** Populated for status='complete': 'sole_survivor' (sealed elimination
+   *  order ran its course) or 'no_contenders' (settled early — at most one
+   *  alive bulb still had active stake). */
+  completion_reason: string | null;
   started_at: string;
   betting_closed_at: string | null;
   ended_at: string | null;

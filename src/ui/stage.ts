@@ -118,15 +118,17 @@ export function computeStage(
 
   // Cord compression for short stages. The deepest glass bottom is
   // cordH_max + capH - 3 + s (middle bulb, norm = 0 → cordH 138); below it
-  // sit the coefficient label (~23px) and the status caption block with
-  // its bottom offset (~110px). If the measured stage can't fit all of
-  // that, scale every cord down proportionally — the parabolic arc shape
-  // is preserved, just flattened — so the caption always renders in clean
-  // space under the lowest bulb. Floor 0.3 keeps the hang readable; below
-  // that the stage itself is unusably short anyway.
-  // = caption block (~100px incl. its 16px bottom offset) + the bulb's
-  // coefficient label below the glass (~23px) + breathing room.
-  const CAPTION_CLEARANCE = 152;
+  // sit the coefficient label and the status caption block. If the
+  // measured stage can't fit all of that, scale every cord down
+  // proportionally — the parabolic arc shape is preserved, just flattened
+  // — so the caption always renders in clean space under the lowest bulb.
+  // Floor 0.3 keeps the hang readable; below that the stage itself is
+  // unusably short anyway.
+  // = coefficient label below the glass (top +6, ~15px text ≈ 21px) +
+  //   clear gap (~35px) + caption block (status + bar row + countdown,
+  //   ~88px) + its 16px bottom offset. Keep in sync with the reserved
+  //   130px bottom band on .room/.stage-bulbs in styles.css.
+  const CAPTION_CLEARANCE = 160;
   const MAX_CORD = 64 + 74;
   let cordScale = 1;
   if (stageHeight !== undefined && stageHeight > 0) {

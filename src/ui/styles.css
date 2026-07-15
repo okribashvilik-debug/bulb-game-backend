@@ -214,43 +214,8 @@ button:disabled {
   /* Snug: just enough breathing room around the chips/buttons — freed
      height goes to the main stage row. */
   padding: 8px 16px;
-  /* visible (not hidden) so the Previous Rounds dropdown panel can extend
-     below the bar; the chips row still scrolls within its own container. */
+  /* The chips row scrolls within its own container. */
   overflow: visible;
-}
-
-.top-strip__history {
-  position: relative;
-  flex-shrink: 0;
-}
-.top-strip__prev-toggle {
-  white-space: nowrap;
-}
-.top-strip__history-panel {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
-  z-index: 50;
-  width: min(520px, 80vw);
-  max-height: 60vh;
-  overflow-y: auto;
-  padding: 12px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-panel);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
-}
-.top-strip__history-panel-title {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-dim);
-  margin-bottom: 10px;
-}
-.top-strip__history-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
 }
 
 .top-strip__brand {
@@ -342,9 +307,14 @@ button:disabled {
    so source order decides, and this must win inside the media query. */
 @media (max-width: 900px) {
   .main-event {
-    /* Scales with the device: ~half the viewport, floored so bulbs never
-       cramp, capped so tablets don't turn the stage into a wall. */
-    min-height: clamp(360px, 52vh, 560px);
+    /* Sized so the bet button clears the fold on first load: viewport
+       minus the fixed chrome above/below the stage (safe padding + top
+       strip + gaps + the control panel down to the bet button's bottom
+       edge, ~350px measured at 375px wide). Floored at 240px — the cord
+       compression in stage.ts keeps bulbs/labels/caption collision-free
+       down to that — and capped so tablets don't turn the stage into a
+       wall. */
+    min-height: clamp(240px, calc(100dvh - 350px), 560px);
   }
 }
 
@@ -419,20 +389,34 @@ button:disabled {
 .room,
 .stage-bulbs {
   position: absolute;
-  /* Bottom band reserved for the status caption (.stage-caption) — bulb
-     geometry is percentage-based, so excluding the band keeps every bulb
-     fully above the status text at any stage height. */
-  inset: 0 0 100px 0;
+  /* Bottom band reserved for the coefficient labels + status caption —
+     tall enough for the lowest (middle) bulb's glass edge, its coefficient
+     label (~21px incl. margin), a comfortable gap, and the full caption
+     block (status + timer bar + countdown, ~60px + 16px bottom offset).
+     Must stay in sync with CAPTION_CLEARANCE in stage.ts, which compresses
+     the cords so the bulbs actually respect this band on short stages. */
+  inset: 0 0 130px 0;
   pointer-events: none;
 }
 .room {
   z-index: 1;
+  /* The room itself (curtain wall + dim floor) stretches over the whole
+     stage, INCLUDING the caption band — the caption sits on the dark floor
+     below the gold horizon, not on bare page background. Only the bulbs
+     (.stage-bulbs) are kept out of the band. */
+  inset: 0;
+  /* Where the floor/horizon sits: 76% per the handoff, but never leaving
+     less than 110px of dim floor — enough for the full caption block
+     (~96px incl. its 16px bottom offset) plus a margin — so on short
+     stages the horizon rises and the caption stays fully below it.
+     room__floor/horizon/pool and the light cones all share this line. */
+  --floor-top: min(76%, calc(100% - 110px));
 }
 .stage-bulbs {
   z-index: 2;
 }
 
-/* Static stage shell: curtain wall, floor, gold horizon at 76%. */
+/* Static stage shell: curtain wall, floor, gold horizon at --floor-top. */
 .room__wall {
   position: absolute;
   inset: 0;
@@ -443,7 +427,7 @@ button:disabled {
   position: absolute;
   left: 0;
   right: 0;
-  top: 76%;
+  top: var(--floor-top);
   bottom: 0;
   background: linear-gradient(to bottom, #150a0f 0%, #0a0509 100%);
 }
@@ -451,7 +435,7 @@ button:disabled {
   position: absolute;
   left: 0;
   right: 0;
-  top: 76%;
+  top: var(--floor-top);
   height: 1px;
   background: rgba(245, 196, 81, 0.3);
 }
@@ -583,7 +567,7 @@ button:disabled {
 /* Floor light pool where the cone lands. */
 .room__pool {
   position: absolute;
-  top: 76%;
+  top: var(--floor-top);
   transform: translateY(-50%);
   border-radius: 50%;
   background: radial-gradient(ellipse, var(--cone-color) 0%, transparent 68%);
@@ -1856,7 +1840,7 @@ button:disabled {
      instead of wrapping and growing the bar as rounds accumulate — same
      no-layout-shift principle as the control-panel note slot. Scrollbar
      hidden; touch momentum scroll keeps older chips reachable (and the
-     Previous Rounds panel still has the full list). */
+     inline "Previous rounds" expander still shows the full list). */
   .top-strip__chips {
     flex-wrap: nowrap;
     overflow-x: auto;
@@ -1882,16 +1866,6 @@ button:disabled {
     width: 16px;
     height: 16px;
     font-size: 9px;
-  }
-  /* The dropdown anchors to a mid-bar button; on a narrow screen pin it
-     to the viewport edges instead so it can't hang off-screen. */
-  .top-strip__history-panel {
-    position: fixed;
-    top: 56px;
-    left: 10px;
-    right: 10px;
-    width: auto;
-    max-height: 70vh;
   }
   /* The feed list caps itself so the stacked page stays navigable; it
      scrolls internally past this. */
